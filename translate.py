@@ -366,6 +366,70 @@ def build_bilingual_srt(
 
 
 # ---------------------------------------------------------------------------
+# Retry helpers / logging
+# ---------------------------------------------------------------------------
+
+
+def _log(msg: str) -> None:
+    """进度日志（借鉴 docs/translate_subtitles.py 的阶段打印风格）。"""
+    print(msg, flush=True)
+
+
+def _is_retryable_exception(exc: BaseException) -> bool:
+    """网络/限流/5xx 等可重试异常。"""
+    name = type(exc).__name__
+    text = str(exc).lower()
+    retry_names = (
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "APIStatusError",
+        "TimeoutError",
+        "RemoteProtocolError",
+        "ConnectError",
+        "ReadTimeout",
+    )
+    if name in retry_names:
+        return True
+    # OpenAI SDK often embeds status in message
+    for needle in ("429", "500", "502", "503", "504", "timeout", "rate limit", "overloaded"):
+        if needle in text:
+            return True
+    # Status code attribute
+    status = getattr(exc, "status_code", None)
+    if status in (408, 409, 429, 500, 502, 503, 504):
+        return True
+    return False
+
+
+def _should_retry_result(
+    status: str,
+    incomplete: Optional[str],
+    raw_text: str,
+    input_map: dict[str, str],
+) -> tuple[bool, str]:
+    """根据 API 结果决定是否重试，并返回原因。"""
+    if status != "completed":
+        return True, f"api status={status}"
+    if incomplete:
+        reason = str(incomplete)
+        hint = ""
+        if "length" in reason.lower():
+            hint = " (可能触顶 max_output_tokens 或输出被截断)"
+        return True, f"incomplete: {reason}{hint}"
+    vr = validate_response(raw_text, input_map)
+    if not vr.ok:
+        # JSON 解析失败或键不全 → 重试一次有时能好
+        joined = " ".join(vr.errors).lower()
+        if "json.loads failed" in joined or "empty response" in joined or "missing keys" in joined:
+            return True, "validate hard fail: " + "; ".join(vr.errors[:3])
+        # 其它结构错误也重试一次
+        return True, "validate hard fail: " + "; ".join(vr.errors[:3])
+    return False, ""
+
+
+# ---------------------------------------------------------------------------
 # run_once
 # ---------------------------------------------------------------------------
 
@@ -382,11 +446,21 @@ def run_once(
     cue_offset: int = 0,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     out_dir: Optional[Path | str] = None,
-    timeout: float = 600.0,
+    timeout: float = 1200.0,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
+    max_retries: int = 2,
+    retry_backoff_sec: float = 3.0,
 ) -> TranslateResult:
+    """
+    单次翻译（含重试）。
+
+    max_retries: 失败后再试的次数（总尝试 = 1 + max_retries）。
+    """
     srt_path = Path(srt_path)
+    out_path = Path(out_dir) if out_dir else None
+
+    _log(f"📂 加载 SRT: {srt_path.name}")
     all_cues = parse_srt(srt_path)
     cues = slice_cues(all_cues, cue_offset=cue_offset, max_cues=max_cues)
     if not cues:
@@ -400,54 +474,142 @@ def run_once(
         target_language=target_language,
     )
 
+    _log(
+        f"🌐 翻译开始 model={model} cues={len(cues)}/{len(all_cues)} "
+        f"(offset={cue_offset}) max_out={max_output_tokens} timeout={timeout}s "
+        f"retries={max_retries}"
+    )
+    _log(f"   input_json ≈ {len(input_json)} chars, instructions ≈ {len(instructions)} chars")
+
+    # 先落盘 input/instructions，全量失败时也有现场
+    if out_path:
+        out_path.mkdir(parents=True, exist_ok=True)
+        (out_path / "input.json").write_text(input_json, encoding="utf-8")
+        (out_path / "instructions.txt").write_text(instructions, encoding="utf-8")
+
     t0 = time.perf_counter()
-    try:
-        mr = model_client.call(
-            model,
-            input_json,
-            instructions=instructions,
-            temperature=temperature,
-            top_p=top_p,
-            max_output_tokens=max_output_tokens,
-            timeout=timeout,
-        )
-        raw_text = mr.text or ""
-        status = mr.status
-        incomplete = mr.incomplete_reason
-        usage = mr.usage
-        model_id = mr.model
-        alias = mr.alias
-    except Exception as e:  # noqa: BLE001
-        elapsed = time.perf_counter() - t0
+    attempts = 1 + max(0, max_retries)
+    last_exc: Optional[BaseException] = None
+    raw_text = ""
+    status = "error"
+    incomplete: Optional[str] = None
+    usage = Usage()
+    model_id = ""
+    alias = model
+    attempt_notes: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        try:
+            _log(f"   → API 调用 attempt {attempt}/{attempts} ...")
+            mr = model_client.call(
+                model,
+                input_json,
+                instructions=instructions,
+                temperature=temperature,
+                top_p=top_p,
+                max_output_tokens=max_output_tokens,
+                timeout=timeout,
+            )
+            raw_text = mr.text or ""
+            status = mr.status
+            incomplete = mr.incomplete_reason
+            usage = mr.usage
+            model_id = mr.model
+            alias = mr.alias
+            last_exc = None
+
+            # 每次都写 raw，便于截断分析
+            if out_path:
+                (out_path / "raw_output.txt").write_text(raw_text, encoding="utf-8")
+                if attempt > 1:
+                    (out_path / f"raw_output.attempt{attempt}.txt").write_text(
+                        raw_text, encoding="utf-8"
+                    )
+
+            retry, why = _should_retry_result(status, incomplete, raw_text, input_map)
+            if not retry:
+                _log(
+                    f"   ✓ attempt {attempt} 成功 status={status} "
+                    f"tokens in/out/total="
+                    f"{usage.input_tokens}/{usage.output_tokens}/{usage.total_tokens}"
+                )
+                break
+
+            attempt_notes.append(f"attempt {attempt}: will retry — {why}")
+            _log(f"   ⚠ attempt {attempt} 需重试: {why}")
+            if incomplete and "length" in str(incomplete).lower():
+                _log(
+                    "   提示: incomplete/length 时提高 max_output_tokens 通常比盲重试更有效"
+                )
+            if attempt >= attempts:
+                break
+            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
+            _log(f"   … 退避 {sleep_s:.1f}s 后重试")
+            time.sleep(sleep_s)
+
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            attempt_notes.append(
+                f"attempt {attempt}: exception {type(e).__name__}: {e}"
+            )
+            _log(f"   ✗ attempt {attempt} 异常: {type(e).__name__}: {e}")
+            if out_path:
+                (out_path / "last_exception.txt").write_text(
+                    f"{type(e).__name__}: {e}\n", encoding="utf-8"
+                )
+            if attempt >= attempts or not _is_retryable_exception(e):
+                status = f"error: {type(e).__name__}: {e}"
+                break
+            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
+            _log(f"   … 可重试异常，退避 {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+
+    elapsed = time.perf_counter() - t0
+
+    if last_exc is not None and not raw_text:
         vr = ValidateReport(
-            ok=False, errors=[f"api error: {type(e).__name__}: {e}"]
+            ok=False,
+            errors=[f"api error: {type(last_exc).__name__}: {last_exc}"]
+            + attempt_notes,
         )
         result = TranslateResult(
             model_alias=model,
-            model_id="",
-            usage=Usage(),
-            status=f"error: {type(e).__name__}: {e}",
+            model_id=model_id,
+            usage=usage,
+            status=status if status.startswith("error") else f"error: {last_exc}",
             incomplete_reason=None,
             validate=vr,
             bilingual_srt=None,
-            raw_text="",
+            raw_text=raw_text,
             elapsed_sec=elapsed,
             input_map=input_map,
             instructions=instructions,
             cues=cues,
         )
-        if out_dir:
-            _write_outputs(Path(out_dir), result, input_json)
+        if out_path:
+            _write_outputs(out_path, result, input_json)
+        _log(f"❌ 翻译失败 model={model} sec={elapsed:.1f}")
         return result
 
-    elapsed = time.perf_counter() - t0
     vr = validate_response(raw_text, input_map)
     if status != "completed":
         vr.errors.append(f"api status={status}")
         vr.ok = False
     if incomplete:
-        vr.errors.append(f"incomplete: {incomplete}")
+        msg = f"incomplete: {incomplete}"
+        if "length" in str(incomplete).lower():
+            msg += (
+                f" — 输出可能被截断；当前 max_output_tokens={max_output_tokens}，"
+                "可提高上限或减小任务量后重试"
+            )
+        vr.errors.append(msg)
         vr.ok = False
+    if any("json.loads failed" in e for e in vr.errors):
+        vr.errors.append(
+            "JSON 解析失败：可能输出被截断、混入非 JSON 文本；已保存 raw_output.txt"
+        )
+    for note in attempt_notes:
+        vr.warnings.append(note)
 
     bilingual: Optional[str] = None
     if vr.ok and vr.parsed:
@@ -468,8 +630,20 @@ def run_once(
         instructions=instructions,
         cues=cues,
     )
-    if out_dir:
-        _write_outputs(Path(out_dir), result, input_json)
+    if out_path:
+        _write_outputs(out_path, result, input_json)
+
+    if result.ok:
+        _log(
+            f"✅ 完成 model={alias} cues={len(cues)} "
+            f"tokens={usage.total_tokens} sec={elapsed:.1f} "
+            f"→ {out_path or '(no out_dir)'}"
+        )
+    else:
+        _log(
+            f"❌ 校验/API 未通过 model={alias} errors={vr.errors[:3]} "
+            f"sec={elapsed:.1f} raw_len={len(raw_text)}"
+        )
     return result
 
 
@@ -494,6 +668,13 @@ def _write_outputs(out_dir: Path, result: TranslateResult, input_json: str) -> N
     if result.bilingual_srt:
         (out_dir / "bilingual.srt").write_text(
             result.bilingual_srt, encoding="utf-8"
+        )
+    else:
+        # 失败时写 partial 占位说明
+        (out_dir / "bilingual.PARTIAL.txt").write_text(
+            "bilingual.srt not written: validation or API failed.\n"
+            "See validate.json / raw_output.txt / meta.json\n",
+            encoding="utf-8",
         )
 
 

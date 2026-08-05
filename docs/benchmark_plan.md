@@ -335,7 +335,17 @@ out/bench/20260805_120000/
 | `list_models()` | bench 模型列表 |
 | 关思考 / temp / top_p | 保持模块默认，**不要**在 translate 里再开思考 |
 | `docs/sub_processor.py` | 可选参考换行；**不**强依赖（协议以 JSON+本地时间码为准） |
-| `docs/translate_subtitles.py` | 旧批处理示意，**不复用**业务逻辑 |
+| `docs/translate_subtitles.py` | Skill 占位脚本；**可借鉴**：阶段日志、双语顺序开关、异常落盘；**不借鉴**：假翻译占位、强制 pysrt、批 20（全量一次策略不同） |
+
+### 6.1 已落地防御（Phase3 前）
+
+| 项 | 实现 |
+|---|---|
+| 全量 timeout | `run`/`bench` 默认 **1200s** |
+| 重试 | `max_retries=2` + 指数退避；429/5xx/超时/incomplete/JSON 硬失败可重试 |
+| 失败仍落盘 | 启动即写 input/instructions；每次 raw；失败写 `bilingual.PARTIAL.txt` |
+| incomplete/length 提示 | validate errors 带 max_out 提示 |
+| 进度日志 | 加载 / 尝试 / 成功失败（风格参考 translate_subtitles 阶段 print） |
 
 **建议小改 `model_client`（实现时）：**
 

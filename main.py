@@ -126,6 +126,8 @@ def _run_one(
         max_output_tokens=args.max_output_tokens,
         out_dir=model_out,
         timeout=args.timeout,
+        max_retries=getattr(args, "max_retries", 2),
+        retry_backoff_sec=getattr(args, "retry_backoff", 3.0),
     )
 
 
@@ -154,7 +156,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.max_output_tokens is None:
         args.max_output_tokens = 131072
     if args.timeout is None:
-        args.timeout = 600.0
+        args.timeout = 1200.0  # 全量预估 10–20min，留足余量
     return _dispatch(models, args, out_dir)
 
 
@@ -164,7 +166,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     if args.max_output_tokens is None:
         args.max_output_tokens = 131072
     if args.timeout is None:
-        args.timeout = 900.0
+        args.timeout = 1200.0
     print(
         f"bench: models={models} jobs={args.jobs} "
         f"max_cues={args.max_cues} out={out_dir}"
@@ -269,6 +271,18 @@ def build_parser() -> argparse.ArgumentParser:
             type=int,
             default=1,
             help="并发模型数（默认 1）",
+        )
+        sp.add_argument(
+            "--max-retries",
+            type=int,
+            default=2,
+            help="失败后额外重试次数（总尝试=1+max_retries）",
+        )
+        sp.add_argument(
+            "--retry-backoff",
+            type=float,
+            default=3.0,
+            help="重试基础退避秒数（指数：3,6,12…）",
         )
 
     sp = sub.add_parser("ping", help="最少 token 连通六模型")
