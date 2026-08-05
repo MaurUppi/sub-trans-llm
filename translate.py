@@ -28,6 +28,16 @@ from pipeline.config import (
     ROOT as _ROOT,
 )
 from pipeline.models import BatchOutcome, Cue, TranslateResult, ValidateReport
+from pipeline.prompt import (
+    SUMMARY_INSTRUCTIONS,
+    build_instructions,
+    build_summary_input,
+    compact_glossary,
+)
+from pipeline.summary import generate_episode_summary
+from pipeline.retry import is_retryable_exception as _is_retryable_exception
+from pipeline.retry import should_retry_result as _should_retry_result
+from pipeline.logging_util import log as _log
 from pipeline.json_repair import repair_model_json, strip_code_fence as _strip_code_fence
 from pipeline.validate import validate_response
 from pipeline.srt_io import (
@@ -55,214 +65,7 @@ __all__ = [
 # SRT I/O: pipeline.srt_io
 
 
-# ---------------------------------------------------------------------------
-# Instructions + Glossary
-# ---------------------------------------------------------------------------
-
-
-def compact_glossary(glossary_path: Path | str) -> str:
-    """从 Markdown 表格提取 原名 → 中文 紧凑对照。"""
-    path = Path(glossary_path)
-    if not path.is_file():
-        return ""
-    lines_out: list[str] = []
-    seen: set[str] = set()
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line.startswith("|"):
-            continue
-        # skip separator |---|
-        if re.match(r"^\|[\s\-:|]+\|$", line):
-            continue
-        parts = [p.strip() for p in line.strip("|").split("|")]
-        if len(parts) < 2:
-            continue
-        zh, src = parts[0], parts[1]
-        # skip header
-        if zh in ("中文译名", "中文") or "原名" in src or src in ("法文/英文原名",):
-            continue
-        if not zh or not src:
-            continue
-        # split multi aliases
-        aliases = re.split(r"[/／]", src)
-        for alias in aliases:
-            alias = alias.strip()
-            # drop parenthetical notes like (Helmut)
-            alias_clean = re.sub(r"\s*\([^)]*\)\s*", " ", alias).strip()
-            if not alias_clean or alias_clean in seen:
-                continue
-            # skip pure Chinese sources
-            if re.fullmatch(r"[\u4e00-\u9fff·]+", alias_clean):
-                continue
-            seen.add(alias_clean)
-            lines_out.append(f"{alias_clean} = {zh}")
-            # also keep form with parenthetical content if different
-            if alias != alias_clean and alias not in seen:
-                seen.add(alias)
-                lines_out.append(f"{alias} = {zh}")
-    return "\n".join(lines_out)
-
-
-def build_instructions(
-    prompt_path: Path | str = DEFAULT_PROMPT,
-    glossary_path: Optional[Path | str] = DEFAULT_GLOSSARY,
-    source_language: str = "英语",
-    target_language: str = "简体中文",
-    episode_summary: Optional[str] = None,
-) -> str:
-    prompt = Path(prompt_path).read_text(encoding="utf-8")
-    prompt = prompt.replace("${sourceLanguage}", source_language)
-    prompt = prompt.replace("${targetLanguage}", target_language)
-    parts = [prompt.rstrip()]
-    if glossary_path:
-        g = compact_glossary(glossary_path)
-        if g.strip():
-            parts.append("\n\n## 专有名词（必须遵守，不得另译）\n" + g)
-    if episode_summary and episode_summary.strip():
-        parts.append(
-            "\n\n## 本集剧情摘要（翻译时请参考语境与人物状态，勿写入输出 JSON）\n"
-            + episode_summary.strip()
-        )
-    return "\n".join(parts).strip() + "\n"
-
-
-def build_summary_input(cues: list[Cue]) -> str:
-    """通读用 input：仅 id + 原文，紧凑，无时间码。"""
-    lines = [f"{c.id}\t{c.text.replace(chr(10), ' / ')}" for c in cues]
-    return "\n".join(lines)
-
-
-SUMMARY_INSTRUCTIONS = """你是影视字幕分析助手。下面是一整集英文字幕（每行：id<TAB>原文）。
-请用简体中文输出本集「翻译用摘要」，控制在 400 字以内，包含：
-1) 一句话梗概
-2) 主要人物及其关系/立场（本集内）
-3) 关键冲突与情绪走向
-4) 翻译时需注意的称谓、潜台词、伏笔或专有名词线索
-
-要求：只输出摘要正文，不要 JSON，不要条目译文，不要 Markdown 标题堆砌。"""
-
-
-def generate_episode_summary(
-    model: str,
-    cues: list[Cue],
-    *,
-    max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
-    timeout: float = 180.0,
-    temperature: Optional[float] = None,
-    top_p: Optional[float] = None,
-    max_retries: int = 2,
-    retry_backoff_sec: float = 3.0,
-    out_dir: Optional[Path] = None,
-) -> tuple[str, Usage, str, Optional[str]]:
-    """
-    全量字幕通读 → 摘要。
-
-    Returns
-    -------
-    summary, usage, status, error_message
-    失败时 summary 可能为空，error_message 非空；调用方可降级为无摘要分批。
-    """
-    summary_input = build_summary_input(cues)
-    if out_dir:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "episode_summary_input.txt").write_text(
-            summary_input, encoding="utf-8"
-        )
-
-    attempts = 1 + max(0, max_retries)
-    last_err: Optional[str] = None
-    usage = Usage()
-    raw = ""
-    status = "error"
-
-    for attempt in range(1, attempts + 1):
-        try:
-            _log(f"📖 通读摘要 attempt {attempt}/{attempts} cues={len(cues)} ...")
-            mr = model_client.call(
-                model,
-                summary_input,
-                instructions=SUMMARY_INSTRUCTIONS,
-                temperature=temperature,
-                top_p=top_p,
-                max_output_tokens=max_output_tokens,
-                timeout=timeout,
-            )
-            raw = (mr.text or "").strip()
-            status = mr.status
-            usage = mr.usage
-            if out_dir:
-                (out_dir / "episode_summary.raw.txt").write_text(
-                    raw, encoding="utf-8"
-                )
-
-            if status == "completed" and raw and not mr.incomplete_reason:
-                _log(
-                    f"   ✓ 摘要完成 chars={len(raw)} "
-                    f"tokens={usage.input_tokens}/{usage.output_tokens}/{usage.total_tokens}"
-                )
-                if out_dir:
-                    (out_dir / "episode_summary.txt").write_text(
-                        raw + "\n", encoding="utf-8"
-                    )
-                    (out_dir / "episode_summary.meta.json").write_text(
-                        json.dumps(
-                            {
-                                "ok": True,
-                                "status": status,
-                                "chars": len(raw),
-                                "usage": {
-                                    "input_tokens": usage.input_tokens,
-                                    "output_tokens": usage.output_tokens,
-                                    "reasoning_tokens": usage.reasoning_tokens,
-                                    "total_tokens": usage.total_tokens,
-                                },
-                            },
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                        encoding="utf-8",
-                    )
-                return raw, usage, status, None
-
-            last_err = (
-                f"status={status} incomplete={mr.incomplete_reason} "
-                f"empty={not bool(raw)}"
-            )
-            _log(f"   ⚠ 摘要不理想: {last_err}")
-        except Exception as e:  # noqa: BLE001
-            last_err = f"{type(e).__name__}: {e}"
-            _log(f"   ✗ 摘要异常: {last_err}")
-            if attempt >= attempts or not _is_retryable_exception(e):
-                break
-            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
-            time.sleep(sleep_s)
-            continue
-        if attempt < attempts:
-            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
-            time.sleep(sleep_s)
-
-    if out_dir:
-        (out_dir / "episode_summary.meta.json").write_text(
-            json.dumps(
-                {
-                    "ok": False,
-                    "status": status,
-                    "error": last_err,
-                    "usage": {
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "reasoning_tokens": usage.reasoning_tokens,
-                        "total_tokens": usage.total_tokens,
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        if raw:
-            (out_dir / "episode_summary.txt").write_text(raw + "\n", encoding="utf-8")
-    return raw, usage, status, last_err or "summary failed"
+# Prompt/summary: pipeline.prompt / pipeline.summary
 
 
 # Validate: pipeline.validate / json_repair
@@ -271,68 +74,7 @@ def generate_episode_summary(
 # Bilingual SRT: pipeline.srt_io
 
 
-# ---------------------------------------------------------------------------
-# Retry helpers / logging
-# ---------------------------------------------------------------------------
-
-
-def _log(msg: str) -> None:
-    """进度日志（借鉴 docs/translate_subtitles.py 的阶段打印风格）。"""
-    print(msg, flush=True)
-
-
-def _is_retryable_exception(exc: BaseException) -> bool:
-    """网络/限流/5xx 等可重试异常。"""
-    name = type(exc).__name__
-    text = str(exc).lower()
-    retry_names = (
-        "APIConnectionError",
-        "APITimeoutError",
-        "RateLimitError",
-        "InternalServerError",
-        "APIStatusError",
-        "TimeoutError",
-        "RemoteProtocolError",
-        "ConnectError",
-        "ReadTimeout",
-    )
-    if name in retry_names:
-        return True
-    # OpenAI SDK often embeds status in message
-    for needle in ("429", "500", "502", "503", "504", "timeout", "rate limit", "overloaded"):
-        if needle in text:
-            return True
-    # Status code attribute
-    status = getattr(exc, "status_code", None)
-    if status in (408, 409, 429, 500, 502, 503, 504):
-        return True
-    return False
-
-
-def _should_retry_result(
-    status: str,
-    incomplete: Optional[str],
-    raw_text: str,
-    input_map: dict[str, str],
-) -> tuple[bool, str]:
-    """根据 API 结果决定是否重试，并返回原因。"""
-    if status != "completed":
-        return True, f"api status={status}"
-    if incomplete:
-        reason = str(incomplete)
-        hint = ""
-        if "length" in reason.lower():
-            hint = " (可能触顶 max_output_tokens 或输出被截断)"
-        return True, f"incomplete: {reason}{hint}"
-    vr = validate_response(raw_text, input_map)
-    if not vr.ok:
-        # JSON 解析失败或键不全 → 重试一次有时能好
-        joined = " ".join(vr.errors).lower()
-        if "json.loads failed" in joined or "empty response" in joined or "missing keys" in joined:
-            return True, "validate hard fail: " + "; ".join(vr.errors[:3])
-        # 其它结构错误也重试一次
-        return True, "validate hard fail: " + "; ".join(vr.errors[:3])
-    return False, ""
+# Retry/logging: pipeline.retry / logging_util
 
 
 # ---------------------------------------------------------------------------
