@@ -68,9 +68,7 @@ def slice_cues(
 
 def chunk_cues(cues: list[Cue], batch_size: int) -> list[list[Cue]]:
     """
-    按批切分（借鉴 translate_subtitles 的 range 步进思路，不 import 该模块）。
-
-    保留各 Cue 已有的全局 id（调用前应对全集 reindex 为 "0".."n-1"）。
+    按批切分。保留各 Cue 已有的全局 id（调用前应对全集 reindex 为 "0".."n-1"）。
     batch_size <= 0 表示单批整包。
     """
     if not cues:
