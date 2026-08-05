@@ -361,6 +361,22 @@ out/bench/20260805_120000/
 - 拼装时：**tr=模型，原文=本地 Cue.text**（时间码本地）。  
 - **不** `import translate_subtitles`；仅借鉴分批步进 + 阶段日志 + 本地拼双语。
 
+### 6.4 通读摘要 + 分批（已实现）
+
+```text
+1) generate_episode_summary: input=全量 id\\ttext → 摘要 S
+   落盘: episode_summary.txt / episode_summary.meta.json / episode_summary_input.txt
+2) instructions = prompt + glossary + S
+3) 分批 input（50 条）顺序或并行 → 本地按全局 id 合并
+```
+
+| CLI | 默认 |
+|---|---|
+| （无 flag） | **启用**通读摘要 |
+| `--no-summary` | 跳过通读 |
+
+摘要失败 → **降级无摘要分批**（不阻断）。对白 input 约 2×；instructions 按批重复。
+
 ### 6.3 方案 B（本地填 src）错位风险评估
 
 | 做法 | 错位风险 |

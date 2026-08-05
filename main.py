@@ -130,6 +130,7 @@ def _run_one(
         retry_backoff_sec=getattr(args, "retry_backoff", 3.0),
         batch_size=getattr(args, "batch_size", 50),
         batch_jobs=getattr(args, "batch_jobs", 1),
+        use_episode_summary=not getattr(args, "no_summary", False),
     )
 
 
@@ -309,6 +310,11 @@ def build_parser() -> argparse.ArgumentParser:
             type=int,
             default=1,
             help="批并行度：1=顺序送批；>1 多批并行请求后本地拼装",
+        )
+        sp.add_argument(
+            "--no-summary",
+            action="store_true",
+            help="跳过通读摘要（默认开启：全量字幕→摘要→注入各批 instructions）",
         )
 
     sp = sub.add_parser("ping", help="最少 token 连通六模型")

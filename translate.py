@@ -22,6 +22,7 @@ DEFAULT_PROMPT = _ROOT / "docs" / "translation_prompt.md"
 DEFAULT_GLOSSARY = _ROOT / "docs" / "Un_Village_francais_Glossary.md"
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
 DEFAULT_BATCH_SIZE = 50
+DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS = 2048
 
 # 省略号
 _ELLIPSIS_OK = "\u2026"  # …
@@ -69,6 +70,12 @@ class TranslateResult:
     input_map: dict[str, str] = field(default_factory=dict)
     instructions: str = ""
     cues: list[Cue] = field(default_factory=list)
+    batch_count: int = 1
+    batch_size: int = 0
+    batch_jobs: int = 1
+    batch_reports: list[dict[str, Any]] = field(default_factory=list)
+    episode_summary: str = ""
+    summary_usage: Optional[Usage] = None
 
     @property
     def ok(self) -> bool:
@@ -79,13 +86,8 @@ class TranslateResult:
             and bool(self.bilingual_srt)
         )
 
-    batch_count: int = 1
-    batch_size: int = 0
-    batch_jobs: int = 1
-    batch_reports: list[dict[str, Any]] = field(default_factory=list)
-
     def meta_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "model_alias": self.model_alias,
             "model_id": self.model_id,
             "status": self.status,
@@ -96,6 +98,7 @@ class TranslateResult:
             "batch_size": self.batch_size,
             "batch_jobs": self.batch_jobs,
             "batch_reports": self.batch_reports,
+            "episode_summary_chars": len(self.episode_summary or ""),
             "usage": {
                 "input_tokens": self.usage.input_tokens,
                 "output_tokens": self.usage.output_tokens,
@@ -104,6 +107,14 @@ class TranslateResult:
             },
             "validate": self.validate.to_dict(),
         }
+        if self.summary_usage is not None:
+            d["summary_usage"] = {
+                "input_tokens": self.summary_usage.input_tokens,
+                "output_tokens": self.summary_usage.output_tokens,
+                "reasoning_tokens": self.summary_usage.reasoning_tokens,
+                "total_tokens": self.summary_usage.total_tokens,
+            }
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +262,7 @@ def build_instructions(
     glossary_path: Optional[Path | str] = DEFAULT_GLOSSARY,
     source_language: str = "英语",
     target_language: str = "简体中文",
+    episode_summary: Optional[str] = None,
 ) -> str:
     prompt = Path(prompt_path).read_text(encoding="utf-8")
     prompt = prompt.replace("${sourceLanguage}", source_language)
@@ -260,7 +272,151 @@ def build_instructions(
         g = compact_glossary(glossary_path)
         if g.strip():
             parts.append("\n\n## 专有名词（必须遵守，不得另译）\n" + g)
+    if episode_summary and episode_summary.strip():
+        parts.append(
+            "\n\n## 本集剧情摘要（翻译时请参考语境与人物状态，勿写入输出 JSON）\n"
+            + episode_summary.strip()
+        )
     return "\n".join(parts).strip() + "\n"
+
+
+def build_summary_input(cues: list[Cue]) -> str:
+    """通读用 input：仅 id + 原文，紧凑，无时间码。"""
+    lines = [f"{c.id}\t{c.text.replace(chr(10), ' / ')}" for c in cues]
+    return "\n".join(lines)
+
+
+SUMMARY_INSTRUCTIONS = """你是影视字幕分析助手。下面是一整集英文字幕（每行：id<TAB>原文）。
+请用简体中文输出本集「翻译用摘要」，控制在 400 字以内，包含：
+1) 一句话梗概
+2) 主要人物及其关系/立场（本集内）
+3) 关键冲突与情绪走向
+4) 翻译时需注意的称谓、潜台词、伏笔或专有名词线索
+
+要求：只输出摘要正文，不要 JSON，不要条目译文，不要 Markdown 标题堆砌。"""
+
+
+def generate_episode_summary(
+    model: str,
+    cues: list[Cue],
+    *,
+    max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
+    timeout: float = 180.0,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_retries: int = 2,
+    retry_backoff_sec: float = 3.0,
+    out_dir: Optional[Path] = None,
+) -> tuple[str, Usage, str, Optional[str]]:
+    """
+    全量字幕通读 → 摘要。
+
+    Returns
+    -------
+    summary, usage, status, error_message
+    失败时 summary 可能为空，error_message 非空；调用方可降级为无摘要分批。
+    """
+    summary_input = build_summary_input(cues)
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "episode_summary_input.txt").write_text(
+            summary_input, encoding="utf-8"
+        )
+
+    attempts = 1 + max(0, max_retries)
+    last_err: Optional[str] = None
+    usage = Usage()
+    raw = ""
+    status = "error"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            _log(f"📖 通读摘要 attempt {attempt}/{attempts} cues={len(cues)} ...")
+            mr = model_client.call(
+                model,
+                summary_input,
+                instructions=SUMMARY_INSTRUCTIONS,
+                temperature=temperature,
+                top_p=top_p,
+                max_output_tokens=max_output_tokens,
+                timeout=timeout,
+            )
+            raw = (mr.text or "").strip()
+            status = mr.status
+            usage = mr.usage
+            if out_dir:
+                (out_dir / "episode_summary.raw.txt").write_text(
+                    raw, encoding="utf-8"
+                )
+
+            if status == "completed" and raw and not mr.incomplete_reason:
+                _log(
+                    f"   ✓ 摘要完成 chars={len(raw)} "
+                    f"tokens={usage.input_tokens}/{usage.output_tokens}/{usage.total_tokens}"
+                )
+                if out_dir:
+                    (out_dir / "episode_summary.txt").write_text(
+                        raw + "\n", encoding="utf-8"
+                    )
+                    (out_dir / "episode_summary.meta.json").write_text(
+                        json.dumps(
+                            {
+                                "ok": True,
+                                "status": status,
+                                "chars": len(raw),
+                                "usage": {
+                                    "input_tokens": usage.input_tokens,
+                                    "output_tokens": usage.output_tokens,
+                                    "reasoning_tokens": usage.reasoning_tokens,
+                                    "total_tokens": usage.total_tokens,
+                                },
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                return raw, usage, status, None
+
+            last_err = (
+                f"status={status} incomplete={mr.incomplete_reason} "
+                f"empty={not bool(raw)}"
+            )
+            _log(f"   ⚠ 摘要不理想: {last_err}")
+        except Exception as e:  # noqa: BLE001
+            last_err = f"{type(e).__name__}: {e}"
+            _log(f"   ✗ 摘要异常: {last_err}")
+            if attempt >= attempts or not _is_retryable_exception(e):
+                break
+            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
+            time.sleep(sleep_s)
+            continue
+        if attempt < attempts:
+            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
+            time.sleep(sleep_s)
+
+    if out_dir:
+        (out_dir / "episode_summary.meta.json").write_text(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": status,
+                    "error": last_err,
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "reasoning_tokens": usage.reasoning_tokens,
+                        "total_tokens": usage.total_tokens,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if raw:
+            (out_dir / "episode_summary.txt").write_text(raw + "\n", encoding="utf-8")
+    return raw, usage, status, last_err or "summary failed"
 
 
 # ---------------------------------------------------------------------------
@@ -657,12 +813,16 @@ def run_once(
     retry_backoff_sec: float = 3.0,
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_jobs: int = 1,
+    use_episode_summary: bool = True,
+    summary_max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
+    summary_timeout: float = 180.0,
 ) -> TranslateResult:
     """
-    整集（或切片）翻译：按 batch_size 分批送模型，本地合并。
+    整集（或切片）翻译：可选通读摘要 + 按 batch_size 分批送模型，本地合并。
 
     - batch_size: 每批条数，默认 50；<=0 表示单批整包
     - batch_jobs: 批并行度，1=顺序；>1 多批并行请求后拼装
+    - use_episode_summary: 先全量通读生成摘要，再注入各批 instructions
     - 双语 SRT：译文用模型 tr，原文用本地 Cue.text（按全局 id 对齐）
     """
     srt_path = Path(srt_path)
@@ -675,11 +835,41 @@ def run_once(
         raise ValueError(f"no cues parsed from {srt_path}")
 
     full_input_json, full_input_map = build_input_json(cues)
+
+    t0 = time.perf_counter()
+    episode_summary = ""
+    summary_usage: Optional[Usage] = None
+    summary_notes: list[str] = []
+
+    if use_episode_summary:
+        summary_dir = out_path  # 落盘到模型输出根目录
+        episode_summary, summary_usage, _sum_status, sum_err = generate_episode_summary(
+            model,
+            cues,
+            max_output_tokens=summary_max_output_tokens,
+            timeout=summary_timeout,
+            temperature=temperature,
+            top_p=top_p,
+            max_retries=max_retries,
+            retry_backoff_sec=retry_backoff_sec,
+            out_dir=summary_dir,
+        )
+        if sum_err:
+            summary_notes.append(f"episode_summary degraded: {sum_err}")
+            _log(f"   ⚠ 摘要失败，降级为无摘要分批: {sum_err}")
+            episode_summary = episode_summary or ""
+        elif not episode_summary.strip():
+            summary_notes.append("episode_summary empty; continue without")
+            _log("   ⚠ 摘要为空，降级为无摘要分批")
+    else:
+        _log("   （跳过通读摘要 use_episode_summary=False）")
+
     instructions = build_instructions(
         prompt_path=prompt_path,
         glossary_path=glossary_path,
         source_language=source_language,
         target_language=target_language,
+        episode_summary=episode_summary or None,
     )
 
     batches = chunk_cues(cues, batch_size)
@@ -687,14 +877,15 @@ def run_once(
     jobs = max(1, int(batch_jobs or 1))
 
     _log(
-        f"🌐 翻译开始 model={model} cues={len(cues)}/{len(all_cues)} "
+        f"🌐 分批翻译 model={model} cues={len(cues)}/{len(all_cues)} "
         f"batches={n_batches}×{batch_size if batch_size > 0 else 'all'} "
         f"batch_jobs={jobs} max_out={max_output_tokens} timeout={timeout}s "
-        f"retries={max_retries}"
+        f"retries={max_retries} summary={'yes' if episode_summary else 'no'}"
     )
     _log(
         f"   full_input ≈ {len(full_input_json)} chars, "
-        f"instructions ≈ {len(instructions)} chars"
+        f"instructions ≈ {len(instructions)} chars "
+        f"(summary_chars={len(episode_summary)})"
     )
 
     if out_path:
@@ -707,6 +898,8 @@ def run_once(
                     "batch_size": batch_size,
                     "batch_jobs": jobs,
                     "n_batches": n_batches,
+                    "use_episode_summary": use_episode_summary,
+                    "episode_summary_chars": len(episode_summary),
                     "batches": [
                         {
                             "index": i,
@@ -723,7 +916,6 @@ def run_once(
             encoding="utf-8",
         )
 
-    t0 = time.perf_counter()
     outcomes: list[_BatchOutcome] = []
 
     def _run_idx(i: int) -> _BatchOutcome:
@@ -872,6 +1064,11 @@ def run_once(
 
     raw_text = "\n\n".join(raw_parts)
     usage = sum_usage(usages)
+    if summary_usage is not None:
+        usage = sum_usage([summary_usage, usage])
+
+    for note in summary_notes:
+        vr.warnings.append(note)
 
     result = TranslateResult(
         model_alias=alias,
@@ -890,6 +1087,8 @@ def run_once(
         batch_size=batch_size if batch_size > 0 else len(cues),
         batch_jobs=jobs,
         batch_reports=batch_reports,
+        episode_summary=episode_summary,
+        summary_usage=summary_usage,
     )
     if out_path:
         _write_outputs(out_path, result, full_input_json)
@@ -897,8 +1096,9 @@ def run_once(
     if result.ok:
         _log(
             f"✅ 完成 model={alias} cues={len(cues)} batches={n_ok}/{n_batches} "
-            f"tokens={usage.total_tokens} sec={elapsed:.1f} "
-            f"→ {out_path or '(no out_dir)'}"
+            f"tokens={usage.total_tokens} "
+            f"(summary={summary_usage.total_tokens if summary_usage else 0}) "
+            f"sec={elapsed:.1f} → {out_path or '(no out_dir)'}"
         )
     else:
         _log(
