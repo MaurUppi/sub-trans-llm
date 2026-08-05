@@ -1278,11 +1278,13 @@ def repair_run_dir(
     retry_backoff_sec: float = 3.0,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
+    sub_batch_size: int = 10,
 ) -> TranslateResult:
     """
     对已有 run 目录只重跑失败批（或指定 batch_indices），合并进 parsed.json 并尝试生成 bilingual.srt。
 
     需要目录内已有: input.json, instructions.txt；建议有 meta.json / parsed.json。
+    sub_batch_size: 整批 API 失败时，拆成更小块重试（绕过审核/截断），默认 10。
     """
     run_dir = Path(run_dir)
     srt_path = Path(srt_path)
@@ -1395,8 +1397,74 @@ def repair_run_dir(
         if oc.validate.ok and oc.validate.parsed:
             existing.update(oc.validate.parsed)
             _log(f"   ✓ batch {i:02d} API 重跑成功")
+            continue
+
+        _log(
+            f"   ✗ batch {i:02d} 整批仍失败，拆小块重试 "
+            f"(sub_batch_size={sub_batch_size})…"
+        )
+        # 审核/截断：拆小块（保持全局 id）；仍失败再减半
+        sizes_to_try = []
+        sb = sub_batch_size if sub_batch_size > 0 else 10
+        while sb >= 1:
+            sizes_to_try.append(sb)
+            if sb == 1:
+                break
+            sb = max(1, sb // 2)
+            if sb in sizes_to_try:
+                break
+
+        ids = {c.id for c in batches[i]}
+        remaining = [c for c in batches[i] if c.id not in existing]
+        for sb_size in sizes_to_try:
+            if not remaining:
+                break
+            _log(f"      · 尝试 sub_batch_size={sb_size} remaining={len(remaining)}")
+            sub_chunks = chunk_cues(remaining, sb_size)
+            still: list[Cue] = []
+            for si, sub in enumerate(sub_chunks):
+                sub_out = bout / f"sub{sb_size}_{si:02d}"
+                soc = _call_one_batch(
+                    model=model,
+                    batch_index=i,
+                    batch_cues=sub,
+                    instructions=instructions,
+                    max_output_tokens=max_output_tokens,
+                    timeout=timeout,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_retries=max(1, max_retries),
+                    retry_backoff_sec=retry_backoff_sec,
+                    batch_out=sub_out,
+                )
+                usages.append(soc.usage)
+                if soc.validate.ok and soc.validate.parsed:
+                    existing.update(soc.validate.parsed)
+                    _log(
+                        f"      ✓ batch {i:02d} sub{sb_size}/{si:02d} "
+                        f"ids={sub[0].id}..{sub[-1].id} n={len(sub)}"
+                    )
+                else:
+                    still.extend(sub)
+                    _log(
+                        f"      ✗ batch {i:02d} sub{sb_size}/{si:02d} "
+                        f"ids={sub[0].id}..{sub[-1].id} "
+                        f"err={soc.validate.errors[:1]}"
+                    )
+            remaining = [c for c in still if c.id not in existing]
+
+        if ids.issubset(set(existing.keys())):
+            part = {k: existing[k] for k in ids}
+            (bout / "parsed.json").write_text(
+                json.dumps(part, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            _log(f"   ✓ batch {i:02d} 经 sub-batch 凑齐 {len(part)} keys")
         else:
-            _log(f"   ✗ batch {i:02d} API 重跑仍失败: {oc.validate.errors[:2]}")
+            miss = sorted(
+                ids - set(existing.keys()),
+                key=lambda x: int(x) if x.isdigit() else x,
+            )
+            _log(f"   ✗ batch {i:02d} sub-batch 后仍缺 {len(miss)}: {miss[:10]}")
 
     elapsed = time.perf_counter() - t0
     missing = sorted(

@@ -55,18 +55,77 @@
 
 ---
 
-## 2. temperature / top_p（统一）
+## 2. temperature / top_p
+
+### 2.1 本项目统一取值（对比阶段 · 已定）
 
 | 参数 | 统一值 | 含义 |
 |---|---|---|
-| `temperature` | **1.0** | 接口常见默认；中性采样强度 |
+| `temperature` | **1.0** | 中性采样；与常见 API 默认对齐 |
 | `top_p` | **1.0** | 不额外截断候选集 |
 
 - 六模型对比时**不得**因模型切换改这两个值。  
-- 官方另有场景推荐（如 DeepSeek 翻译表写 1.3）仅作参考，**本项目对比阶段以 1.0/1.0 为准**。  
-- 建议只调其一的行业惯例：当前两者均固定，不再叠加其它采样旋钮。
+- 官方场景推荐（见 §2.2）仅作参考与后续 A/B；**本项目对比阶段仍以 1.0 / 1.0 为准**。  
+- 多家文档建议「`temperature` 与 `top_p` 二选一调节」；本阶段两者固定，不再叠加其它采样旋钮。
+
+### 2.2 官方对「翻译」或通用生成的采样建议（检索摘要）
+
+> 检索日期：2026-08-05。下表区分 **「明确写给翻译场景」** 与 **「通用 / 旁系型号默认」**。  
+> 本项目六模型中：DeepSeek / Doubao 走 **火山方舟**；Qwen 走 **阿里云百炼通用对话型号**（非 Qwen-MT）。
+
+#### DeepSeek（官方 API · 场景表明确写「翻译」）
+
+| 项 | 值 / 说明 | 来源 |
+|---|---|---|
+| API 默认 `temperature` | **1.0** | [DeepSeek API · Temperature 设置](https://api-docs.deepseek.com/zh-cn/quick_start/parameter_settings/) |
+| **翻译场景推荐 `temperature`** | **1.3** | 同上（场景表：代码/数学 0.0 · 数据抽取 1.0 · **通用对话 1.3 · 翻译 1.3** · 创意写作 1.5） |
+| `top_p` 与翻译 | **无单独「翻译」推荐** | Chat Completions 文档：默认 **1**；建议改 `temperature` **或** `top_p`，**不建议同时大改两者**（[create-chat-completion](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)） |
+| 与本项目关系 | 方舟托管的 deepseek-v4-flash/pro 沿用同一家族采样语义；官方场景表是 **直连 DeepSeek API** 文档，方舟未另发「翻译=1.3」专表 | 对比阶段仍 **1.0/1.0**；若单开「按官方翻译最优」实验可试 **temp=1.3、top_p 保持 1.0** |
+
+#### 阿里 Qwen（通用 Qwen3 vs 翻译专用 Qwen-MT）
+
+| 层级 | temperature | top_p | 其它 | 来源 / 适用 |
+|---|---:|---:|---|---|
+| **Qwen3 非思考 / Instruct**（通用） | **0.7** | **0.8** | `top_k=20`，`min_p=0`；可调 `presence_penalty` 0–2 降重复 | [Qwen Quickstart](https://qwen.readthedocs.io/en/latest/getting_started/quickstart.html) · HuggingFace model card Best Practices |
+| **Qwen3 思考模式**（本项目已关） | **0.6** | **0.95** | `top_k=20`；**勿用贪心解码** | 同上 |
+| **Qwen-MT（专用翻译型号）** | 默认 **0.65** | 默认 **0.8** | `top_k` 默认 **1**；文档写 temperature 与 top_p **建议只设其一** | [百炼 · Qwen-MT API](https://help.aliyun.com/zh/model-studio/qwen-mt-api) / [EN](https://www.alibabacloud.com/help/en/model-studio/qwen-mt-api) |
+
+要点：
+
+- **没有**「qwen3.7-plus / max / 3.8-max 翻译场景专用 temperature」的官方单表；最接近的是 **Qwen3 非思考通用推荐 0.7 / 0.8**，以及 **Qwen-MT 默认 0.65 / 0.8**。  
+- **Qwen-MT 不在本项目六模型内**；其默认值仅作「阿里官方翻译产品线」旁证，不能直接改写六模型对比参数。  
+- 本项目 Qwen 三模型：**关 thinking** → 若做「跟官方通用推荐」对照，可试 **0.7 / 0.8**；对比主线仍 **1.0 / 1.0**。
+
+#### 豆包 Doubao / 火山方舟（通用型号）
+
+| 项 | 结论 | 来源 / 说明 |
+|---|---|---|
+| **翻译场景专用 temperature / top_p** | **未检索到**方舟或豆包官方文档中「翻译 → 某固定 temp/top_p」场景表 | 与 DeepSeek 官方场景表不同 |
+| 通用 Chat / Responses 参数 | 支持 `temperature`、`top_p` 等采样旋钮；文档侧重参数含义与取值范围，**未绑定「翻译」推荐值** | 火山方舟 Chat API 等（[对话 API](https://www.volcengine.com/docs/82379/1494384)） |
+| 旁系：`doubao-seed-translation` 等翻译增强型号 | 产品定位为翻译；**公开材料强调能力/语种，不给出与本表同级的 temp/top_p 场景推荐** | **不在本项目六模型内**（见 §5.2） |
+| 与本项目关系 | `doubao-seed-2-1-turbo` 按 **通用生成** 处理；对比阶段 **1.0 / 1.0**；无官方「翻译最优」可对齐时，不以第三方博客默认值（如 0.7/0.9）替代官方 |
+
+#### 三家对照（翻译相关 · 便于扫一眼）
+
+| 厂商 | 本项目型号 | 官方是否写明「翻译」采样 | 官方给出的相关值 | 本项目对比取值 |
+|---|---|---|---|---|
+| DeepSeek | deepseek-v4-flash / pro（方舟） | **是**（API 场景表） | 翻译 **temperature=1.3**；`top_p` 默认 1、无翻译专值 | **1.0 / 1.0** |
+| 豆包 | doubao-seed-2-1-turbo（方舟） | **否**（通用型号无翻译专表） | 无官方翻译推荐；通用可调 | **1.0 / 1.0** |
+| 阿里 Qwen | qwen3.7-plus / max / 3.8-max | **否**（通用型号）；**旁证** Qwen-MT | 非思考通用 **0.7 / 0.8**；Qwen-MT 默认 **0.65 / 0.8** | **1.0 / 1.0** |
+
+### 2.3 后续可选实验（不改变当前主线）
+
+若在对比主线之外做「贴官方」采样实验，建议**一次只改一家、且与 1.0/1.0 基线对照**：
+
+| 实验标签 | 建议参数 | 依据 |
+|---|---|---|
+| `ds-official-translate` | temp=**1.3**，top_p=**1.0**（或只动 temp） | DeepSeek 场景表「翻译」 |
+| `qwen-nontthinking-best` | temp=**0.7**，top_p=**0.8**（可选 top_k=20，若网关支持） | Qwen3 非思考官方推荐 |
+| `qwen-mt-like-defaults` | temp=**0.65**，top_p=**0.8** | Qwen-MT API 默认（**旁证**，非本项目型号） |
+| `doubao` | **暂无官方翻译锚点**；保持 1.0/1.0 或仅与 Qwen/DeepSeek 做同参数对照 | 避免无出处调参 |
 
 ---
+
 
 ## 3. max_output_tokens（统一最大值）
 
@@ -389,8 +448,8 @@ Netflix / AGENTS 文件用于：**维护模板时的对照**、评审、后处�
 | 参数 | 值 | 状态 |
 |---|---|---|
 | thinking / reasoning | **关闭** | 已定 |
-| temperature | **1.0** | 已定 |
-| top_p | **1.0** | 已定 |
+| temperature | **1.0** | 已定（官方翻译建议见 §2.2，对比阶段不跟） |
+| top_p | **1.0** | 已定（同上） |
 | max_output_tokens | **131072** | 已定 |
 | **`instructions`** | **脚本读取 `translation_prompt.md`（变量替换）+ Glossary 等外部文件拼接** | **已定** |
 | **`input`** | **字幕 JSON 字符串** `{"id":"原文",...}` | **已定（必须 JSON）** |
@@ -414,4 +473,5 @@ Netflix / AGENTS 文件用于：**维护模板时的对照**、评审、后处�
 
 *定稿反馈纳入日期：2026-08-05。*  
 *字段分工：system 模板 + Glossary → `instructions`（Python 读文件组装）；待译 JSON → `input`。*  
-*标点 / 禁 `|` / 省略号 `…`：对齐 Netflix 简中 Timed Text；AGENTS 与 Netflix 全文仅作参考。*
+*标点 / 禁 `|` / 省略号 `…`：对齐 Netflix 简中 Timed Text；AGENTS 与 Netflix 全文仅作参考。*  
+*§2.2 官方采样：DeepSeek 翻译 temp=1.3；Qwen 非思考 0.7/0.8、Qwen-MT 默认 0.65/0.8；Doubao 通用型号无翻译专表（2026-08-05 检索）。*
