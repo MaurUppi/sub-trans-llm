@@ -128,6 +128,8 @@ def _run_one(
         timeout=args.timeout,
         max_retries=getattr(args, "max_retries", 2),
         retry_backoff_sec=getattr(args, "retry_backoff", 3.0),
+        batch_size=getattr(args, "batch_size", 50),
+        batch_jobs=getattr(args, "batch_jobs", 1),
     )
 
 
@@ -142,6 +144,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         args.timeout = 180.0
     print(
         f"smoke: models={models} max_cues={args.max_cues} "
+        f"batch_size={args.batch_size} batch_jobs={args.batch_jobs} "
         f"max_out={args.max_output_tokens} out={out_dir}"
     )
     return _dispatch(models, args, out_dir)
@@ -156,7 +159,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.max_output_tokens is None:
         args.max_output_tokens = 131072
     if args.timeout is None:
-        args.timeout = 1200.0  # 全量预估 10–20min，留足余量
+        # 分批后单批更快；总墙钟仍可能较长，默认 1200
+        args.timeout = 1200.0
+    # 全量默认 50/批；可用 --batch-jobs 并行送批
+    if getattr(args, "batch_size", None) is None:
+        args.batch_size = 50
+    print(
+        f"run: model={args.model} batch_size={args.batch_size} "
+        f"batch_jobs={args.batch_jobs} out={out_dir}"
+    )
     return _dispatch(models, args, out_dir)
 
 
@@ -167,8 +178,11 @@ def cmd_bench(args: argparse.Namespace) -> int:
         args.max_output_tokens = 131072
     if args.timeout is None:
         args.timeout = 1200.0
+    if getattr(args, "batch_size", None) is None:
+        args.batch_size = 50
     print(
-        f"bench: models={models} jobs={args.jobs} "
+        f"bench: models={models} model_jobs={args.jobs} "
+        f"batch_size={args.batch_size} batch_jobs={args.batch_jobs} "
         f"max_cues={args.max_cues} out={out_dir}"
     )
     return _dispatch(models, args, out_dir)
@@ -283,6 +297,18 @@ def build_parser() -> argparse.ArgumentParser:
             type=float,
             default=3.0,
             help="重试基础退避秒数（指数：3,6,12…）",
+        )
+        sp.add_argument(
+            "--batch-size",
+            type=int,
+            default=50,
+            help="每批字幕条数（默认 50；<=0 表示单批整包）",
+        )
+        sp.add_argument(
+            "--batch-jobs",
+            type=int,
+            default=1,
+            help="批并行度：1=顺序送批；>1 多批并行请求后本地拼装",
         )
 
     sp = sub.add_parser("ping", help="最少 token 连通六模型")

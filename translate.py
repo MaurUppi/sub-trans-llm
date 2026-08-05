@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,6 +21,7 @@ _ROOT = Path(__file__).resolve().parent
 DEFAULT_PROMPT = _ROOT / "docs" / "translation_prompt.md"
 DEFAULT_GLOSSARY = _ROOT / "docs" / "Un_Village_francais_Glossary.md"
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
+DEFAULT_BATCH_SIZE = 50
 
 # 省略号
 _ELLIPSIS_OK = "\u2026"  # …
@@ -77,6 +79,11 @@ class TranslateResult:
             and bool(self.bilingual_srt)
         )
 
+    batch_count: int = 1
+    batch_size: int = 0
+    batch_jobs: int = 1
+    batch_reports: list[dict[str, Any]] = field(default_factory=list)
+
     def meta_dict(self) -> dict[str, Any]:
         return {
             "model_alias": self.model_alias,
@@ -85,6 +92,10 @@ class TranslateResult:
             "incomplete_reason": self.incomplete_reason,
             "elapsed_sec": round(self.elapsed_sec, 3),
             "ok": self.ok,
+            "batch_count": self.batch_count,
+            "batch_size": self.batch_size,
+            "batch_jobs": self.batch_jobs,
+            "batch_reports": self.batch_reports,
             "usage": {
                 "input_tokens": self.usage.input_tokens,
                 "output_tokens": self.usage.output_tokens,
@@ -154,6 +165,30 @@ def slice_cues(
     end = None if max_cues is None else cue_offset + max_cues
     sliced = cues[cue_offset:end]
     return reindex_cues(sliced)
+
+
+def chunk_cues(cues: list[Cue], batch_size: int) -> list[list[Cue]]:
+    """
+    按批切分（借鉴 translate_subtitles 的 range 步进思路，不 import 该模块）。
+
+    保留各 Cue 已有的全局 id（调用前应对全集 reindex 为 "0".."n-1"）。
+    batch_size <= 0 表示单批整包。
+    """
+    if not cues:
+        return []
+    if batch_size is None or batch_size <= 0 or batch_size >= len(cues):
+        return [cues]
+    return [cues[i : i + batch_size] for i in range(0, len(cues), batch_size)]
+
+
+def sum_usage(parts: list[Usage]) -> Usage:
+    u = Usage()
+    for p in parts:
+        u.input_tokens += p.input_tokens
+        u.output_tokens += p.output_tokens
+        u.reasoning_tokens += p.reasoning_tokens
+        u.total_tokens += p.total_tokens
+    return u
 
 
 def build_input_json(cues: list[Cue]) -> tuple[str, dict[str, str]]:
@@ -430,7 +465,176 @@ def _should_retry_result(
 
 
 # ---------------------------------------------------------------------------
-# run_once
+# 单批 API 调用（带重试）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _BatchOutcome:
+    batch_index: int
+    cues: list[Cue]
+    input_map: dict[str, str]
+    raw_text: str
+    status: str
+    incomplete_reason: Optional[str]
+    usage: Usage
+    model_id: str
+    alias: str
+    validate: ValidateReport
+    attempt_notes: list[str] = field(default_factory=list)
+
+
+def _call_one_batch(
+    *,
+    model: str,
+    batch_index: int,
+    batch_cues: list[Cue],
+    instructions: str,
+    max_output_tokens: int,
+    timeout: float,
+    temperature: Optional[float],
+    top_p: Optional[float],
+    max_retries: int,
+    retry_backoff_sec: float,
+    batch_out: Optional[Path],
+) -> _BatchOutcome:
+    """对一批 cue 调用模型（JSON 键使用全局 id）。"""
+    input_json, input_map = build_input_json(batch_cues)
+    if batch_out:
+        batch_out.mkdir(parents=True, exist_ok=True)
+        (batch_out / "input.json").write_text(input_json, encoding="utf-8")
+
+    attempts = 1 + max(0, max_retries)
+    last_exc: Optional[BaseException] = None
+    raw_text = ""
+    status = "error"
+    incomplete: Optional[str] = None
+    usage = Usage()
+    model_id = ""
+    alias = model
+    attempt_notes: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        try:
+            _log(
+                f"   → batch {batch_index:02d} API attempt {attempt}/{attempts} "
+                f"(cues={len(batch_cues)} ids={batch_cues[0].id}..{batch_cues[-1].id})"
+            )
+            mr = model_client.call(
+                model,
+                input_json,
+                instructions=instructions,
+                temperature=temperature,
+                top_p=top_p,
+                max_output_tokens=max_output_tokens,
+                timeout=timeout,
+            )
+            raw_text = mr.text or ""
+            status = mr.status
+            incomplete = mr.incomplete_reason
+            usage = mr.usage
+            model_id = mr.model
+            alias = mr.alias
+            last_exc = None
+
+            if batch_out:
+                (batch_out / "raw_output.txt").write_text(raw_text, encoding="utf-8")
+                if attempt > 1:
+                    (batch_out / f"raw_output.attempt{attempt}.txt").write_text(
+                        raw_text, encoding="utf-8"
+                    )
+
+            retry, why = _should_retry_result(status, incomplete, raw_text, input_map)
+            if not retry:
+                _log(
+                    f"   ✓ batch {batch_index:02d} ok "
+                    f"tokens={usage.input_tokens}/{usage.output_tokens}/{usage.total_tokens}"
+                )
+                break
+
+            attempt_notes.append(f"batch{batch_index} attempt{attempt}: retry — {why}")
+            _log(f"   ⚠ batch {batch_index:02d} attempt {attempt} 需重试: {why}")
+            if attempt >= attempts:
+                break
+            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
+            _log(f"   … 退避 {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            attempt_notes.append(
+                f"batch{batch_index} attempt{attempt}: {type(e).__name__}: {e}"
+            )
+            _log(
+                f"   ✗ batch {batch_index:02d} attempt {attempt} "
+                f"异常: {type(e).__name__}: {e}"
+            )
+            if batch_out:
+                (batch_out / "last_exception.txt").write_text(
+                    f"{type(e).__name__}: {e}\n", encoding="utf-8"
+                )
+            if attempt >= attempts or not _is_retryable_exception(e):
+                status = f"error: {type(e).__name__}: {e}"
+                break
+            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
+            _log(f"   … 可重试异常，退避 {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+
+    if last_exc is not None and not raw_text:
+        vr = ValidateReport(
+            ok=False,
+            errors=[f"api error: {type(last_exc).__name__}: {last_exc}"]
+            + attempt_notes,
+            stats={"n_in": len(input_map), "n_out": 0, "n_tr_ok": 0},
+        )
+    else:
+        vr = validate_response(raw_text, input_map)
+        if status != "completed":
+            vr.errors.append(f"api status={status}")
+            vr.ok = False
+        if incomplete:
+            msg = f"incomplete: {incomplete}"
+            if "length" in str(incomplete).lower():
+                msg += (
+                    f" — 可能截断；max_output_tokens={max_output_tokens}"
+                )
+            vr.errors.append(msg)
+            vr.ok = False
+        if any("json.loads failed" in e for e in vr.errors):
+            vr.errors.append(
+                "JSON 解析失败：可能输出被截断；见 raw_output.txt"
+            )
+        for note in attempt_notes:
+            vr.warnings.append(note)
+
+    if batch_out:
+        (batch_out / "validate.json").write_text(
+            json.dumps(vr.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if vr.parsed:
+            (batch_out / "parsed.json").write_text(
+                json.dumps(vr.parsed, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    return _BatchOutcome(
+        batch_index=batch_index,
+        cues=batch_cues,
+        input_map=input_map,
+        raw_text=raw_text,
+        status=status,
+        incomplete_reason=incomplete,
+        usage=usage,
+        model_id=model_id,
+        alias=alias,
+        validate=vr,
+        attempt_notes=attempt_notes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_once：分批（顺序或并行）+ 本地拼装
 # ---------------------------------------------------------------------------
 
 
@@ -451,11 +655,15 @@ def run_once(
     top_p: Optional[float] = None,
     max_retries: int = 2,
     retry_backoff_sec: float = 3.0,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_jobs: int = 1,
 ) -> TranslateResult:
     """
-    单次翻译（含重试）。
+    整集（或切片）翻译：按 batch_size 分批送模型，本地合并。
 
-    max_retries: 失败后再试的次数（总尝试 = 1 + max_retries）。
+    - batch_size: 每批条数，默认 50；<=0 表示单批整包
+    - batch_jobs: 批并行度，1=顺序；>1 多批并行请求后拼装
+    - 双语 SRT：译文用模型 tr，原文用本地 Cue.text（按全局 id 对齐）
     """
     srt_path = Path(srt_path)
     out_path = Path(out_dir) if out_dir else None
@@ -466,7 +674,7 @@ def run_once(
     if not cues:
         raise ValueError(f"no cues parsed from {srt_path}")
 
-    input_json, input_map = build_input_json(cues)
+    full_input_json, full_input_map = build_input_json(cues)
     instructions = build_instructions(
         prompt_path=prompt_path,
         glossary_path=glossary_path,
@@ -474,175 +682,229 @@ def run_once(
         target_language=target_language,
     )
 
+    batches = chunk_cues(cues, batch_size)
+    n_batches = len(batches)
+    jobs = max(1, int(batch_jobs or 1))
+
     _log(
         f"🌐 翻译开始 model={model} cues={len(cues)}/{len(all_cues)} "
-        f"(offset={cue_offset}) max_out={max_output_tokens} timeout={timeout}s "
+        f"batches={n_batches}×{batch_size if batch_size > 0 else 'all'} "
+        f"batch_jobs={jobs} max_out={max_output_tokens} timeout={timeout}s "
         f"retries={max_retries}"
     )
-    _log(f"   input_json ≈ {len(input_json)} chars, instructions ≈ {len(instructions)} chars")
+    _log(
+        f"   full_input ≈ {len(full_input_json)} chars, "
+        f"instructions ≈ {len(instructions)} chars"
+    )
 
-    # 先落盘 input/instructions，全量失败时也有现场
     if out_path:
         out_path.mkdir(parents=True, exist_ok=True)
-        (out_path / "input.json").write_text(input_json, encoding="utf-8")
+        (out_path / "input.json").write_text(full_input_json, encoding="utf-8")
         (out_path / "instructions.txt").write_text(instructions, encoding="utf-8")
+        (out_path / "batches_plan.json").write_text(
+            json.dumps(
+                {
+                    "batch_size": batch_size,
+                    "batch_jobs": jobs,
+                    "n_batches": n_batches,
+                    "batches": [
+                        {
+                            "index": i,
+                            "n": len(b),
+                            "id_from": b[0].id,
+                            "id_to": b[-1].id,
+                        }
+                        for i, b in enumerate(batches)
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     t0 = time.perf_counter()
-    attempts = 1 + max(0, max_retries)
-    last_exc: Optional[BaseException] = None
-    raw_text = ""
-    status = "error"
-    incomplete: Optional[str] = None
-    usage = Usage()
-    model_id = ""
-    alias = model
-    attempt_notes: list[str] = []
+    outcomes: list[_BatchOutcome] = []
 
-    for attempt in range(1, attempts + 1):
-        try:
-            _log(f"   → API 调用 attempt {attempt}/{attempts} ...")
-            mr = model_client.call(
-                model,
-                input_json,
-                instructions=instructions,
-                temperature=temperature,
-                top_p=top_p,
-                max_output_tokens=max_output_tokens,
-                timeout=timeout,
-            )
-            raw_text = mr.text or ""
-            status = mr.status
-            incomplete = mr.incomplete_reason
-            usage = mr.usage
-            model_id = mr.model
-            alias = mr.alias
-            last_exc = None
+    def _run_idx(i: int) -> _BatchOutcome:
+        bout = (out_path / f"batch_{i:02d}") if out_path else None
+        return _call_one_batch(
+            model=model,
+            batch_index=i,
+            batch_cues=batches[i],
+            instructions=instructions,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+            temperature=temperature,
+            top_p=top_p,
+            max_retries=max_retries,
+            retry_backoff_sec=retry_backoff_sec,
+            batch_out=bout,
+        )
 
-            # 每次都写 raw，便于截断分析
-            if out_path:
-                (out_path / "raw_output.txt").write_text(raw_text, encoding="utf-8")
-                if attempt > 1:
-                    (out_path / f"raw_output.attempt{attempt}.txt").write_text(
-                        raw_text, encoding="utf-8"
+    if jobs == 1 or n_batches == 1:
+        for i in range(n_batches):
+            outcomes.append(_run_idx(i))
+    else:
+        _log(f"   ⚡ 并行发送 {n_batches} 批（workers={jobs}）…")
+        with ThreadPoolExecutor(max_workers=min(jobs, n_batches)) as ex:
+            futs = {ex.submit(_run_idx, i): i for i in range(n_batches)}
+            tmp: dict[int, _BatchOutcome] = {}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                try:
+                    tmp[i] = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    _log(f"   ✗ batch {i:02d} worker 崩溃: {e}")
+                    tmp[i] = _BatchOutcome(
+                        batch_index=i,
+                        cues=batches[i],
+                        input_map={c.id: c.text for c in batches[i]},
+                        raw_text="",
+                        status=f"error: {type(e).__name__}: {e}",
+                        incomplete_reason=None,
+                        usage=Usage(),
+                        model_id="",
+                        alias=model,
+                        validate=ValidateReport(
+                            ok=False, errors=[str(e)]
+                        ),
                     )
-
-            retry, why = _should_retry_result(status, incomplete, raw_text, input_map)
-            if not retry:
-                _log(
-                    f"   ✓ attempt {attempt} 成功 status={status} "
-                    f"tokens in/out/total="
-                    f"{usage.input_tokens}/{usage.output_tokens}/{usage.total_tokens}"
-                )
-                break
-
-            attempt_notes.append(f"attempt {attempt}: will retry — {why}")
-            _log(f"   ⚠ attempt {attempt} 需重试: {why}")
-            if incomplete and "length" in str(incomplete).lower():
-                _log(
-                    "   提示: incomplete/length 时提高 max_output_tokens 通常比盲重试更有效"
-                )
-            if attempt >= attempts:
-                break
-            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
-            _log(f"   … 退避 {sleep_s:.1f}s 后重试")
-            time.sleep(sleep_s)
-
-        except Exception as e:  # noqa: BLE001
-            last_exc = e
-            attempt_notes.append(
-                f"attempt {attempt}: exception {type(e).__name__}: {e}"
-            )
-            _log(f"   ✗ attempt {attempt} 异常: {type(e).__name__}: {e}")
-            if out_path:
-                (out_path / "last_exception.txt").write_text(
-                    f"{type(e).__name__}: {e}\n", encoding="utf-8"
-                )
-            if attempt >= attempts or not _is_retryable_exception(e):
-                status = f"error: {type(e).__name__}: {e}"
-                break
-            sleep_s = retry_backoff_sec * (2 ** (attempt - 1))
-            _log(f"   … 可重试异常，退避 {sleep_s:.1f}s")
-            time.sleep(sleep_s)
+            outcomes = [tmp[i] for i in range(n_batches)]
 
     elapsed = time.perf_counter() - t0
 
-    if last_exc is not None and not raw_text:
-        vr = ValidateReport(
-            ok=False,
-            errors=[f"api error: {type(last_exc).__name__}: {last_exc}"]
-            + attempt_notes,
-        )
-        result = TranslateResult(
-            model_alias=model,
-            model_id=model_id,
-            usage=usage,
-            status=status if status.startswith("error") else f"error: {last_exc}",
-            incomplete_reason=None,
-            validate=vr,
-            bilingual_srt=None,
-            raw_text=raw_text,
-            elapsed_sec=elapsed,
-            input_map=input_map,
-            instructions=instructions,
-            cues=cues,
-        )
-        if out_path:
-            _write_outputs(out_path, result, input_json)
-        _log(f"❌ 翻译失败 model={model} sec={elapsed:.1f}")
-        return result
+    # 合并
+    merged_parsed: dict[str, dict[str, str]] = {}
+    all_errors: list[str] = []
+    all_warnings: list[str] = []
+    batch_reports: list[dict[str, Any]] = []
+    usages: list[Usage] = []
+    raw_parts: list[str] = []
+    model_id = ""
+    alias = model
+    any_incomplete: Optional[str] = None
 
-    vr = validate_response(raw_text, input_map)
-    if status != "completed":
-        vr.errors.append(f"api status={status}")
-        vr.ok = False
-    if incomplete:
-        msg = f"incomplete: {incomplete}"
-        if "length" in str(incomplete).lower():
-            msg += (
-                f" — 输出可能被截断；当前 max_output_tokens={max_output_tokens}，"
-                "可提高上限或减小任务量后重试"
-            )
-        vr.errors.append(msg)
-        vr.ok = False
-    if any("json.loads failed" in e for e in vr.errors):
-        vr.errors.append(
-            "JSON 解析失败：可能输出被截断、混入非 JSON 文本；已保存 raw_output.txt"
+    for oc in outcomes:
+        usages.append(oc.usage)
+        if oc.model_id:
+            model_id = oc.model_id
+        if oc.alias:
+            alias = oc.alias
+        if oc.incomplete_reason and not any_incomplete:
+            any_incomplete = oc.incomplete_reason
+        if oc.raw_text:
+            raw_parts.append(f"--- batch {oc.batch_index:02d} ---\n{oc.raw_text}")
+        batch_reports.append(
+            {
+                "batch_index": oc.batch_index,
+                "ok": oc.validate.ok,
+                "status": oc.status,
+                "n_in": oc.validate.stats.get("n_in", len(oc.input_map)),
+                "n_tr_ok": oc.validate.stats.get("n_tr_ok", 0),
+                "errors": oc.validate.errors,
+                "warnings": oc.validate.warnings,
+                "usage": {
+                    "input_tokens": oc.usage.input_tokens,
+                    "output_tokens": oc.usage.output_tokens,
+                    "total_tokens": oc.usage.total_tokens,
+                    "reasoning_tokens": oc.usage.reasoning_tokens,
+                },
+            }
         )
-    for note in attempt_notes:
-        vr.warnings.append(note)
+        if not oc.validate.ok:
+            all_errors.append(
+                f"batch {oc.batch_index:02d}: "
+                + ("; ".join(oc.validate.errors[:3]) or oc.status)
+            )
+        all_warnings.extend(
+            f"batch {oc.batch_index:02d}: {w}" for w in oc.validate.warnings
+        )
+        if oc.validate.parsed:
+            for k, v in oc.validate.parsed.items():
+                if k in merged_parsed:
+                    all_warnings.append(f"duplicate key after merge: {k}")
+                merged_parsed[k] = v
+
+    # 全集键完整性
+    missing = sorted(
+        set(full_input_map) - set(merged_parsed),
+        key=lambda x: int(x) if x.isdigit() else x,
+    )
+    if missing:
+        all_errors.append(
+            "missing keys after merge: "
+            + ", ".join(missing[:30])
+            + (f" ...(+{len(missing)-30})" if len(missing) > 30 else "")
+        )
+
+    n_ok = sum(1 for oc in outcomes if oc.validate.ok)
+    overall_ok = n_ok == n_batches and not missing and len(merged_parsed) == len(cues)
+    status = (
+        "completed"
+        if overall_ok
+        else f"error: {n_ok}/{n_batches} batches ok, merged={len(merged_parsed)}/{len(cues)}"
+    )
+
+    vr = ValidateReport(
+        ok=overall_ok,
+        errors=all_errors,
+        warnings=all_warnings,
+        parsed=merged_parsed if merged_parsed else None,
+        stats={
+            "n_in": len(full_input_map),
+            "n_out": len(merged_parsed),
+            "n_tr_ok": sum(
+                1
+                for k, v in merged_parsed.items()
+                if (v.get("tr") or "").strip()
+            ),
+            "n_batches": n_batches,
+            "n_batches_ok": n_ok,
+        },
+    )
 
     bilingual: Optional[str] = None
-    if vr.ok and vr.parsed:
-        tr_map = {k: v["tr"] for k, v in vr.parsed.items()}
+    if overall_ok:
+        tr_map = {k: v["tr"] for k, v in merged_parsed.items()}
+        # 原文始终用本地 Cue.text，避免模型 src 改写（方案 B 评估见 docs）
         bilingual = build_bilingual_srt(cues, tr_map)
+
+    raw_text = "\n\n".join(raw_parts)
+    usage = sum_usage(usages)
 
     result = TranslateResult(
         model_alias=alias,
         model_id=model_id,
         usage=usage,
         status=status,
-        incomplete_reason=incomplete,
+        incomplete_reason=any_incomplete,
         validate=vr,
         bilingual_srt=bilingual,
         raw_text=raw_text,
         elapsed_sec=elapsed,
-        input_map=input_map,
+        input_map=full_input_map,
         instructions=instructions,
         cues=cues,
+        batch_count=n_batches,
+        batch_size=batch_size if batch_size > 0 else len(cues),
+        batch_jobs=jobs,
+        batch_reports=batch_reports,
     )
     if out_path:
-        _write_outputs(out_path, result, input_json)
+        _write_outputs(out_path, result, full_input_json)
 
     if result.ok:
         _log(
-            f"✅ 完成 model={alias} cues={len(cues)} "
+            f"✅ 完成 model={alias} cues={len(cues)} batches={n_ok}/{n_batches} "
             f"tokens={usage.total_tokens} sec={elapsed:.1f} "
             f"→ {out_path or '(no out_dir)'}"
         )
     else:
         _log(
-            f"❌ 校验/API 未通过 model={alias} errors={vr.errors[:3]} "
-            f"sec={elapsed:.1f} raw_len={len(raw_text)}"
+            f"❌ 未通过 model={alias} batches_ok={n_ok}/{n_batches} "
+            f"merged={len(merged_parsed)}/{len(cues)} "
+            f"errors={all_errors[:3]} sec={elapsed:.1f}"
         )
     return result
 
@@ -713,4 +975,18 @@ def self_check_offline(srt_path: Path | str) -> None:
     srt = build_bilingual_srt(sliced, tr_map)
     assert "中文一行" in srt
     assert sliced[0].text.split("\n")[0] in srt
-    print(f"offline self-check OK: total_cues={len(cues)} sample={len(sliced)}")
+
+    # chunking: 747 / 50 → 15 batches (14*50 + 47)
+    full = reindex_cues(cues)
+    chunks = chunk_cues(full, 50)
+    assert len(chunks) == (len(full) + 49) // 50
+    assert sum(len(c) for c in chunks) == len(full)
+    assert chunks[0][0].id == "0"
+    assert chunks[1][0].id == "50"
+    assert chunk_cues(full, 0) == [full]
+    assert sum_usage([Usage(1, 2, 0, 3), Usage(4, 5, 1, 10)]).total_tokens == 13
+
+    print(
+        f"offline self-check OK: total_cues={len(cues)} sample={len(sliced)} "
+        f"batches_50={len(chunks)}"
+    )
