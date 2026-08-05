@@ -3,7 +3,7 @@
 依据：`baseinfo.md`、`quality_control.md`、现有 `model_client.py`。  
 目标：整文件（或切片）英进 → JSON 协议 → 校验 → 双语 SRT（**译文在上、原文在下**）；六模型可比对照。
 
-**本阶段：方案设计。实现前先跑通烟测，再并发全量。**
+**状态：已实现 `translate.py` + `main.py`；六模型 smoke（8 条）并行通过（2026-08-05）。**
 
 ---
 
@@ -362,12 +362,12 @@ out/bench/20260805_120000/
 
 ## 8. 实现顺序（编码 checklist）
 
-1. [ ] `translate.py`：`parse_srt` / `build_input_json` / `build_instructions` / `compact_glossary`  
-2. [ ] `validate_response` + fixture 单测（无 API）  
-3. [ ] `build_bilingual_srt`（tr 上 / 本地 text 下）  
-4. [ ] `run_once` 调 `model_client.call`  
-5. [ ] `main.py`：`smoke` / `run` / `bench`  
-6. [ ] Phase 2 smoke（8 条 × 1 模型 → 8 条 × 6 顺序）  
+1. [x] `translate.py`：`parse_srt` / `build_input_json` / `build_instructions` / `compact_glossary`  
+2. [x] `validate_response` + offline selfcheck  
+3. [x] `build_bilingual_srt`（tr 上 / 本地 text 下）  
+4. [x] `run_once` 调 `model_client.call`  
+5. [x] `main.py`：`ping` / `selfcheck` / `smoke` / `run` / `bench`  
+6. [x] Phase 2 smoke（8 条 × 6 模型并行 agent，均 OK，reasoning=0）  
 7. [ ] Phase 3 单模型全量 flash  
 8. [ ] Phase 4 bench `--jobs 1`，需要时再 `--jobs 2..6`  
 
