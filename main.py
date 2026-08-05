@@ -142,14 +142,53 @@ def cmd_repair(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
+def _maybe_preprocess(args: argparse.Namespace) -> Path:
+    """If --preprocess, run Stage A and return clean SRT path; else original."""
+    srt = Path(args.srt)
+    if not getattr(args, "preprocess", False):
+        return srt
+    from pipeline.preprocess.config import PreprocessConfig
+    from pipeline.preprocess.orchestrate_a import run_preprocess
+
+    fix = "auto"
+    if getattr(args, "fix_overlaps", False):
+        fix = "on"
+    if getattr(args, "no_fix_overlaps", False):
+        fix = "off"
+    resplit = "auto"
+    if getattr(args, "resplit", False):
+        resplit = "on"
+    if getattr(args, "no_resplit", False):
+        resplit = "off"
+    work = Path(args.out) / "_preprocess" if args.out else None
+    cfg = PreprocessConfig(
+        fix_overlaps=fix,  # type: ignore[arg-type]
+        remove_sdh=bool(getattr(args, "remove_sdh", False)),
+        remove_disfluency=bool(getattr(args, "remove_disfluency", False)),
+        optimize=bool(getattr(args, "optimize", False)),
+        resplit=resplit,  # type: ignore[arg-type]
+        words_path=Path(args.words) if getattr(args, "words", None) else None,
+        model=getattr(args, "model", None) or getattr(args, "models", None),
+        work_dir=work,
+    )
+    # single-model string if models is list-like string
+    if isinstance(cfg.model, str) and "," in cfg.model:
+        cfg.model = cfg.model.split(",")[0].strip()
+    pr = run_preprocess(srt, cfg)
+    assert pr.clean_srt_path is not None
+    print(f"preprocess: clean → {pr.clean_srt_path}")
+    return pr.clean_srt_path
+
+
 def _run_one(
     model: str,
     args: argparse.Namespace,
     out_dir: Path,
 ) -> translate.TranslateResult:
     model_out = out_dir / model.replace("/", "_")
+    srt_path = Path(getattr(args, "_resolved_srt", None) or args.srt)
     return translate.run_once(
-        srt_path=Path(args.srt),
+        srt_path=srt_path,
         model=model,
         source_language=args.source_language,
         target_language=args.target_language,
@@ -170,6 +209,30 @@ def _run_one(
     )
 
 
+def _deliver_zh(args: argparse.Namespace, results: list[translate.TranslateResult]) -> None:
+    """Write {stem}_zh.srt next to source (or --output) for successful runs."""
+    from pipeline.preprocess.deliver import write_zh_srt
+
+    source = Path(getattr(args, "srt", "") or "")
+    # prefer original user srt for naming, not clean path
+    name_src = Path(getattr(args, "_original_srt", None) or source)
+    out_override = getattr(args, "output", None)
+    for r in results:
+        if not r.ok:
+            continue
+        # multi-model: suffix with model alias
+        if out_override and len(results) == 1:
+            path = write_zh_srt(r, name_src, output=out_override)
+        elif len(results) == 1:
+            path = write_zh_srt(r, name_src)
+        else:
+            stem = name_src.stem
+            path = name_src.with_name(f"{stem}_{r.model_alias}_zh.srt")
+            path = write_zh_srt(r, name_src, output=path)
+        if path:
+            print(f"交付: {path}")
+
+
 def cmd_smoke(args: argparse.Namespace) -> int:
     models = _parse_models(args.models)
     out_dir = Path(args.out) if args.out else _default_out("smoke")
@@ -187,6 +250,40 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     return _dispatch(models, args, out_dir)
 
 
+def cmd_preprocess(args: argparse.Namespace) -> int:
+    """Stage A only."""
+    from pipeline.preprocess.config import PreprocessConfig
+    from pipeline.preprocess.orchestrate_a import run_preprocess
+
+    fix = "auto"
+    if getattr(args, "fix_overlaps", False):
+        fix = "on"
+    if getattr(args, "no_fix_overlaps", False):
+        fix = "off"
+    resplit = "auto"
+    if getattr(args, "resplit", False):
+        resplit = "on"
+    if getattr(args, "no_resplit", False):
+        resplit = "off"
+    work = Path(args.out) if args.out else None
+    cfg = PreprocessConfig(
+        fix_overlaps=fix,  # type: ignore[arg-type]
+        remove_sdh=bool(args.remove_sdh),
+        remove_disfluency=bool(args.remove_disfluency),
+        optimize=bool(args.optimize),
+        resplit=resplit,  # type: ignore[arg-type]
+        words_path=Path(args.words) if args.words else None,
+        model=args.model,
+        work_dir=work,
+    )
+    pr = run_preprocess(args.srt, cfg)
+    print(
+        f"OK preprocess {pr.meta['counts'].get('in')}→{pr.meta['counts'].get('out')} "
+        f"clean={pr.clean_srt_path}"
+    )
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     if not args.model:
         print("run requires --model", file=sys.stderr)
@@ -201,13 +298,45 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 全量默认 50/批；可用 --batch-jobs 并行送批
     if getattr(args, "batch_size", None) is None:
         args.batch_size = 50
+    args._original_srt = Path(args.srt)
+    args._resolved_srt = _maybe_preprocess(args)
+    args.srt = str(args._resolved_srt)
     print(
         f"run: model={args.model} batch_size={args.batch_size} "
         f"batch_jobs={args.batch_jobs} "
         f"temp={getattr(args, 'temperature', None)} "
-        f"top_p={getattr(args, 'top_p', None)} out={out_dir}"
+        f"top_p={getattr(args, 'top_p', None)} "
+        f"preprocess={bool(getattr(args, 'preprocess', False))} out={out_dir}"
     )
-    return _dispatch(models, args, out_dir)
+    code = _dispatch(models, args, out_dir)
+    # re-load results for deliver? _dispatch doesn't return results.
+    # Deliver from model out dir bilingual if present.
+    from pipeline.preprocess.deliver import default_zh_path, write_zh_srt
+    from model_client import Usage
+    from pipeline.models import TranslateResult, ValidateReport
+
+    model_out = out_dir / args.model.replace("/", "_")
+    bi = model_out / "bilingual.srt"
+    if bi.is_file():
+        r = TranslateResult(
+            model_alias=args.model,
+            model_id="",
+            usage=Usage(),
+            status="completed",
+            incomplete_reason=None,
+            validate=ValidateReport(ok=True),
+            bilingual_srt=bi.read_text(encoding="utf-8"),
+            raw_text="",
+            elapsed_sec=0.0,
+        )
+        path = write_zh_srt(
+            r,
+            getattr(args, "_original_srt", Path(args.srt)),
+            output=getattr(args, "output", None),
+        )
+        if path:
+            print(f"交付: {path}")
+    return code
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
@@ -311,8 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument(
             "--glossary",
-            default=str(_ROOT / "docs" / "Un_Village_francais_Glossary.md"),
-            help="设为空字符串可关闭 glossary",
+            default=None,
+            help="可选术语表路径；默认不注入 Glossary",
         )
         sp.add_argument("--max-cues", type=int, default=None)
         sp.add_argument("--cue-offset", type=int, default=0)
@@ -412,9 +541,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_smoke)
 
+    def add_preprocess_flags(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--fix-overlaps",
+            action="store_true",
+            help="强制启用时间轴去重叠（默认 auto：检测到重叠才修）",
+        )
+        sp.add_argument(
+            "--no-fix-overlaps",
+            action="store_true",
+            help="禁用时间轴去重叠",
+        )
+        sp.add_argument("--remove-sdh", action="store_true", help="移除 SDH 标记/纯 SDH 块")
+        sp.add_argument(
+            "--remove-disfluency",
+            action="store_true",
+            help="移除口癖/重复（改原文）",
+        )
+        sp.add_argument("--optimize", action="store_true", help="LLM 源文优化（条数不变）")
+        sp.add_argument("--resplit", action="store_true", help="强制重切过长字幕")
+        sp.add_argument("--no-resplit", action="store_true", help="禁止重切")
+        sp.add_argument(
+            "--words",
+            default=None,
+            help="词级时间戳 JSON（启用 VideoCaptioner Split 时）",
+        )
+
+    sp = sub.add_parser("preprocess", help="Stage A：字幕前处理（不翻译）")
+    add_common(sp)
+    add_preprocess_flags(sp)
+    sp.add_argument(
+        "--model",
+        default=None,
+        help="optimize/resplit-LLM 时使用的模型 alias",
+    )
+    sp.set_defaults(func=cmd_preprocess)
+
     sp = sub.add_parser("run", help="单模型运行（默认可全量）")
     add_common(sp)
+    add_preprocess_flags(sp)
     sp.add_argument("--model", required=True)
+    sp.add_argument(
+        "--preprocess",
+        action="store_true",
+        help="联动：先 Stage A 前处理再翻译",
+    )
+    sp.add_argument(
+        "--output",
+        default=None,
+        help="最终双语 SRT 路径（默认：与源同目录 {stem}_zh.srt）",
+    )
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("bench", help="多模型 benchmark")

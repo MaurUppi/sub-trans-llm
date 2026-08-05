@@ -47,7 +47,7 @@ def compact_glossary(glossary_path: Path | str) -> str:
 
 def build_instructions(
     prompt_path: Path | str = DEFAULT_PROMPT,
-    glossary_path: Optional[Path | str] = DEFAULT_GLOSSARY,
+    glossary_path: Optional[Path | str] = None,
     source_language: str = "英语",
     target_language: str = "简体中文",
     episode_summary: Optional[str] = None,

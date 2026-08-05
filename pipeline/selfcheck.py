@@ -27,7 +27,8 @@ def self_check_offline(srt_path: Path | str) -> None:
     assert sliced[0].id == "0"
     js, mp = build_input_json(sliced)
     assert json.loads(js) == mp
-    inst = build_instructions()
+    from pipeline.config import DEFAULT_GLOSSARY
+    inst = build_instructions(glossary_path=DEFAULT_GLOSSARY)
     assert "英语" in inst or "${sourceLanguage}" not in inst
     assert "简体中文" in inst or "${targetLanguage}" not in inst
     assert " = " in inst  # glossary lines

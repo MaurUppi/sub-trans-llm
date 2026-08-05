@@ -39,7 +39,7 @@ def run_once(
     source_language: str = "英语",
     target_language: str = "简体中文",
     prompt_path: Path | str = DEFAULT_PROMPT,
-    glossary_path: Optional[Path | str] = DEFAULT_GLOSSARY,
+    glossary_path: Optional[Path | str] = None,
     max_cues: Optional[int] = None,
     cue_offset: int = 0,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
