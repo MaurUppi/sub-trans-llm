@@ -29,6 +29,7 @@ from pipeline.srt_io import (
     slice_cues,
     sum_usage,
 )
+from pipeline.subtitle_check import check_subtitle_quality
 from pipeline.summary import generate_episode_summary
 
 
@@ -328,10 +329,20 @@ def run_once(
     )
 
     bilingual: Optional[str] = None
+    subtitle_quality: Optional[dict] = None
     if overall_ok:
         tr_map = {k: v["tr"] for k, v in merged_parsed.items()}
         # 原文始终用本地 Cue.text，避免模型 src 改写（方案 B 评估见 docs）
         bilingual = build_bilingual_srt(cues, tr_map)
+        # 译文侧字幕约束：只度量不阻断，供六模型横向比较
+        sq = check_subtitle_quality(cues, tr_map)
+        subtitle_quality = sq.to_dict()
+        if sq.n_cps_over or sq.n_line_over or sq.n_lines_over:
+            vr.warnings.append(
+                f"subtitle quality: cps_over={sq.n_cps_over} "
+                f"line_over={sq.n_line_over} lines_over={sq.n_lines_over} "
+                f"(max_cps={sq.max_cps}, p95={sq.p95_cps})"
+            )
 
     raw_text = "\n\n".join(raw_parts)
     usage = sum_usage(usages)
@@ -360,6 +371,7 @@ def run_once(
         batch_reports=batch_reports,
         episode_summary=episode_summary,
         summary_usage=summary_usage,
+        subtitle_quality=subtitle_quality,
     )
     if out_path:
         write_outputs(out_path, result, full_input_json)

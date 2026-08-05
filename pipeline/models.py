@@ -53,6 +53,8 @@ class TranslateResult:
     batch_reports: list[dict[str, Any]] = field(default_factory=list)
     episode_summary: str = ""
     summary_usage: Optional[Usage] = None
+    # 译文侧字幕约束度量（CPS/行长/行数）。只做度量不阻断，见 pipeline/subtitle_check.py
+    subtitle_quality: Optional[dict[str, Any]] = None
 
     @property
     def ok(self) -> bool:
@@ -84,6 +86,8 @@ class TranslateResult:
             },
             "validate": self.validate.to_dict(),
         }
+        if self.subtitle_quality is not None:
+            d["subtitle_quality"] = self.subtitle_quality
         if self.summary_usage is not None:
             d["summary_usage"] = {
                 "input_tokens": self.summary_usage.input_tokens,

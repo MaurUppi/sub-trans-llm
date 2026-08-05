@@ -4,16 +4,29 @@ import json
 import re
 from typing import Optional
 
-from pipeline.config import ELLIPSIS_BAD
+from pipeline.config import ELLIPSIS_BAD, STRICT_SRC_DEFAULT
 from pipeline.json_repair import repair_model_json, strip_code_fence
 from pipeline.models import ValidateReport
+from pipeline.src_align import build_src_index, classify_src
 
 
 def _norm_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def validate_response(raw: str, input_map: dict[str, str]) -> ValidateReport:
+def validate_response(
+    raw: str,
+    input_map: dict[str, str],
+    *,
+    strict_src: bool = STRICT_SRC_DEFAULT,
+) -> ValidateReport:
+    """校验模型回包是否满足输出契约。
+
+    strict_src=True 时，`src` 回显错位（本条回显了另一条的原文）或与本条内容
+    完全不符，判为 **error** —— 这类事故不会破坏 JSON、键集也齐全，只能靠回显
+    比对发现，而成片原文取自本地 Cue，所以一旦错位就是整段译文对错行。
+    判为 error 后会自动走既有的重试 / 拆批链路（见 `pipeline/retry.py`）。
+    """
     errors: list[str] = []
     warnings: list[str] = []
     parsed: Optional[dict[str, dict[str, str]]] = None
@@ -67,6 +80,7 @@ def validate_response(raw: str, input_map: dict[str, str]) -> ValidateReport:
             f" ...(+{len(extra)-20})" if len(extra) > 20 else ""
         ))
 
+    src_index = build_src_index(input_map)
     result_map: dict[str, dict[str, str]] = {}
     for kid, expected_src in input_map.items():
         if kid not in data_s:
@@ -83,15 +97,22 @@ def validate_response(raw: str, input_map: dict[str, str]) -> ValidateReport:
         if not isinstance(tr, str):
             errors.append(f"id {kid}: tr must be string")
             continue
-        if src is None:
-            warnings.append(f"id {kid}: missing src")
-            src = ""
-        elif not isinstance(src, str):
+        if src is not None and not isinstance(src, str):
             warnings.append(f"id {kid}: src not string")
             src = str(src)
-        else:
-            if _norm_ws(src) != _norm_ws(expected_src):
-                warnings.append(f"id {kid}: src mismatch")
+
+        verdict = classify_src(kid, src, input_map, src_index)
+        if verdict.kind == "missing":
+            warnings.append(f"id {kid}: missing src")
+            src = ""
+        elif verdict.kind == "drift":
+            warnings.append(f"id {kid}: src drift (ratio={verdict.ratio:.2f})")
+        elif verdict.kind == "misaligned":
+            msg = f"id {kid}: src misaligned — echoes id {verdict.other_id}"
+            (errors if strict_src else warnings).append(msg)
+        elif verdict.kind == "mismatch":
+            msg = f"id {kid}: src mismatch (ratio={verdict.ratio:.2f})"
+            (errors if strict_src else warnings).append(msg)
 
         if "，" in tr or "。" in tr:
             warnings.append(f"id {kid}: contains '，' or '。'")
