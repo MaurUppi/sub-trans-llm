@@ -181,18 +181,36 @@ def _maybe_preprocess(args: argparse.Namespace) -> Path:
 
 
 def _sampling_from_args(args: argparse.Namespace) -> tuple[object, object]:
-    """Map CLI --temperature/--no-temp (and top_p) to model_client args.
+    """Map CLI --temperature / --top-p to model_client args.
 
-    ``None`` → resolve from .env / fallback 1.0.
-    ``OMIT`` → never send the field (provider default).
+    **默认不发送**：没显式给值就是 ``OMIT``，字段不进请求体，用服务端默认。
+    给了值（含 ``0``）就照发。不再读 .env。
     """
-    temp: object = model_client.OMIT if getattr(args, "no_temp", False) else getattr(
-        args, "temperature", None
+    temp = getattr(args, "temperature", None)
+    top_p = getattr(args, "top_p", None)
+    return (
+        model_client.OMIT if temp is None else temp,
+        model_client.OMIT if top_p is None else top_p,
     )
-    top_p: object = model_client.OMIT if getattr(args, "no_top_p", False) else getattr(
-        args, "top_p", None
+
+
+def warn_if_both_sampling(args: argparse.Namespace) -> None:
+    """同时显式指定 temperature 与 top_p 时给出警告。
+
+    阿里云 Responses 参数表（docs/阿里云-OpenAI兼容-Responses创建响应.md L85-86）
+    对两者都写了「建议只设置其中一个值」，与 OpenAI 的口径一致：两者叠加会让
+    参数效果不可归因。故意只警告不阻断——官方 SCENARIO_CONFIGS 的翻译配置
+    (temperature=0.3, top_p=0.8) 本身就同时给两个值，硬互斥会让它无法复现。
+    """
+    if getattr(args, "temperature", None) is None:
+        return
+    if getattr(args, "top_p", None) is None:
+        return
+    print(
+        "warning: 同时指定了 temperature 与 top_p；官方建议只设其一"
+        "（两者叠加会使参数效果无法归因）。翻译场景优先只调 temperature。",
+        file=sys.stderr,
     )
-    return temp, top_p
 
 
 def _fmt_sampling(args: argparse.Namespace) -> str:
@@ -507,31 +525,24 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="跳过通读摘要（默认开启：全量字幕→摘要→注入各批 instructions）",
         )
-        tg = sp.add_mutually_exclusive_group()
-        tg.add_argument(
+        sp.add_argument(
             "--temperature",
             type=float,
             default=None,
-            help="采样温度（默认读 .env DEFAULT_TEMPERATURE；缺省 1.0）",
+            help=(
+                "采样温度 [0,2)；默认不向 API 传该字段（服务端默认），给值才发。"
+                "官方翻译场景建议 0.3。与 --top-p 建议只设其一"
+            ),
         )
-        tg.add_argument(
-            "--no-temp",
-            action="store_true",
-            help="不向 API 传 temperature（服务端默认；与 --temperature 互斥）",
-        )
-        pg = sp.add_mutually_exclusive_group()
-        pg.add_argument(
+        sp.add_argument(
             "--top-p",
             type=float,
             default=None,
             dest="top_p",
-            help="nucleus top_p（默认读 .env DEFAULT_TOP_P；缺省 1.0）",
-        )
-        pg.add_argument(
-            "--no-top-p",
-            action="store_true",
-            dest="no_top_p",
-            help="不向 API 传 top_p（服务端默认；与 --top-p 互斥）",
+            help=(
+                "核采样 top_p (0,1]；默认不向 API 传该字段（服务端默认），给值才发。"
+                "与 --temperature 建议只设其一，优先调 temperature"
+            ),
         )
 
     sp = sub.add_parser("ping", help="最少 token 连通六模型")
@@ -644,6 +655,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # empty glossary string → None
     if hasattr(args, "glossary") and args.glossary == "":
         args.glossary = None
+    warn_if_both_sampling(args)
     return int(args.func(args))
 
 

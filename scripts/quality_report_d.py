@@ -376,13 +376,9 @@ def run_d(args: argparse.Namespace) -> Path:
         cmd.extend(["--cue-offset", str(args.cue_offset)])
     if args.max_output_tokens:
         cmd.extend(["--max-output-tokens", str(args.max_output_tokens)])
-    if getattr(args, "no_temp", False):
-        cmd.append("--no-temp")
-    elif getattr(args, "temperature", None) is not None:
+    if getattr(args, "temperature", None) is not None:
         cmd.extend(["--temperature", str(args.temperature)])
-    if getattr(args, "no_top_p", False):
-        cmd.append("--no-top-p")
-    elif getattr(args, "top_p", None) is not None:
+    if getattr(args, "top_p", None) is not None:
         cmd.extend(["--top-p", str(args.top_p)])
     print(">>>", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=str(ROOT), check=False)
@@ -390,29 +386,22 @@ def run_d(args: argparse.Namespace) -> Path:
 
 
 def _sampling_cfg(args: argparse.Namespace) -> dict:
-    """Serialize sampling mode for the report (omit | float | None=env default)."""
-    if getattr(args, "no_temp", False):
-        temp: object = "omit"
-    else:
-        temp = getattr(args, "temperature", None)
-    if getattr(args, "no_top_p", False):
-        top_p: object = "omit"
-    else:
-        top_p = getattr(args, "top_p", None)
+    """Serialize sampling mode for the report (float = sent | None = not sent)."""
     return {
-        "temperature": temp,
-        "top_p": top_p,
+        "temperature": getattr(args, "temperature", None),
+        "top_p": getattr(args, "top_p", None),
         "sampling_note": (
-            "None → .env DEFAULT_* then fallback 1.0; "
-            "'omit' (--no-temp/--no-top-p or env omit) → field not sent to API"
+            "None → field not sent to API (provider default); "
+            "float → sent verbatim. .env DEFAULT_TEMPERATURE/DEFAULT_TOP_P "
+            "are no longer consulted."
         ),
     }
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Config D quality run + report. Sampling: --temperature/--top-p "
-        "or --no-temp/--no-top-p (omit from API)."
+        description="Config D quality run + report. Sampling: temperature/top_p are "
+        "omitted from the request unless --temperature/--top-p are given."
     )
     ap.add_argument("--srt", default=str(DEFAULT_SRT))
     ap.add_argument("--model", default="qwen3.7-max")
@@ -423,31 +412,18 @@ def main() -> int:
     ap.add_argument("--cue-offset", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=1200)
     ap.add_argument("--max-output-tokens", type=int, default=None)
-    tg = ap.add_mutually_exclusive_group()
-    tg.add_argument(
+    ap.add_argument(
         "--temperature",
         type=float,
         default=None,
-        help="sampling temperature (default: .env DEFAULT_TEMPERATURE)",
+        help="sampling temperature; omitted from the request unless given",
     )
-    tg.add_argument(
-        "--no-temp",
-        action="store_true",
-        help="omit temperature from API request (provider default)",
-    )
-    pg = ap.add_mutually_exclusive_group()
-    pg.add_argument(
+    ap.add_argument(
         "--top-p",
         type=float,
         default=None,
         dest="top_p",
-        help="nucleus top_p (default: .env DEFAULT_TOP_P)",
-    )
-    pg.add_argument(
-        "--no-top-p",
-        action="store_true",
-        dest="no_top_p",
-        help="omit top_p from API request (provider default)",
+        help="nucleus top_p; omitted from the request unless given",
     )
     ap.add_argument("--run", action="store_true", help="execute API run (config D)")
     ap.add_argument(

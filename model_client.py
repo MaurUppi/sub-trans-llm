@@ -9,7 +9,7 @@
 
 约定：
   - 强制关闭思考
-  - temperature / top_p：未传时读 .env（默认 1.0）；``omit``/``OMIT`` 则不传给 API
+  - temperature / top_p：**默认不传**；只有显式给值才写进请求体
   - Responses API
   - max_output_tokens 可选
 
@@ -18,8 +18,8 @@
     from model_client import call, list_models, OMIT
 
     r = call("deepseek-v4-flash", "Reply with exactly: OK", max_output_tokens=16)
-    # 强制不传采样参数（用服务端默认）：
-    # r = call(..., temperature=OMIT, top_p=OMIT)
+    # 默认就不传采样参数（服务端默认）；要调就显式给值：
+    # r = call(..., temperature=0.2, top_p=0.8)
     print(r.text, r.usage)
 """
 
@@ -33,7 +33,7 @@ from typing import Any, Optional, Union
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# Sampling: explicit value | None (→ .env / fallback) | OMIT (never send)
+# Sampling: explicit value = send it | None / OMIT = never send (provider default)
 # ---------------------------------------------------------------------------
 
 
@@ -127,38 +127,23 @@ def _env_int_optional(name: str) -> Optional[int]:
 
 def _resolve_sampling_param(
     explicit: SamplingArg,
-    env_name: str,
-    *,
-    fallback: Optional[float] = 1.0,
+    env_name: str,  # noqa: ARG001 — 保留形参以免调用点大改；已不再读取 env
 ) -> Optional[float]:
     """
     Resolve temperature / top_p to a value sent on the wire, or None to omit.
 
-    - ``OMIT`` → None (never send; provider/model default)
-    - explicit float → that value
-    - explicit None → read env:
-        * numeric → use it
-        * omit/none/empty/api/default → None
-        * env missing → ``fallback`` (historically 1.0; None means omit)
+    **默认不发送**：只有显式传入数值才会写进请求体，其余一律 None（走服务端默认）。
+
+    - explicit float → that value（``0`` 也是合法值，会照发）
+    - ``None`` / ``OMIT`` → None，字段不进请求体
+
+    历史行为是「未传则读 .env ``DEFAULT_TEMPERATURE``/``DEFAULT_TOP_P``，缺省 1.0」。
+    已废弃：默认值散落在 .env 里会让六模型对比实验的采样条件变得不可见且易漂移，
+    要调采样就在命令行显式写出来。
     """
-    if explicit is OMIT:
+    if explicit is OMIT or explicit is None:
         return None
-    if explicit is not None:
-        return float(explicit)
-    from_env = _env_float_optional(env_name)
-    if from_env is not None:
-        return from_env
-    # env key present as omit → _env_float_optional returns None while key exists
-    raw = _env(env_name)
-    if raw is not None and str(raw).strip().lower() in (
-        "",
-        "omit",
-        "none",
-        "api",
-        "default",
-    ):
-        return None
-    return fallback
+    return float(explicit)
 
 
 # 阿里云 Responses API：max_output_tokens 下限为 16（实测 5 会 400）
@@ -335,8 +320,8 @@ def call(
     cfg = resolve_model(model)
     client = _build_client(cfg, timeout=timeout)
 
-    temperature = _resolve_sampling_param(temperature, "DEFAULT_TEMPERATURE", fallback=1.0)
-    top_p = _resolve_sampling_param(top_p, "DEFAULT_TOP_P", fallback=1.0)
+    temperature = _resolve_sampling_param(temperature, "DEFAULT_TEMPERATURE")
+    top_p = _resolve_sampling_param(top_p, "DEFAULT_TOP_P")
     if max_output_tokens is None:
         max_output_tokens = _env_int_optional("DEFAULT_MAX_OUTPUT_TOKENS")
 
