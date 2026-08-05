@@ -17,104 +17,28 @@ from typing import Any, Optional
 import model_client
 from model_client import Usage
 
-_ROOT = Path(__file__).resolve().parent
-DEFAULT_PROMPT = _ROOT / "docs" / "translation_prompt.md"
-DEFAULT_GLOSSARY = _ROOT / "docs" / "Un_Village_francais_Glossary.md"
-DEFAULT_MAX_OUTPUT_TOKENS = 131072
-DEFAULT_BATCH_SIZE = 50
-DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS = 2048
+from pipeline.config import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_GLOSSARY,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_PROMPT,
+    DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
+    ELLIPSIS_BAD as _ELLIPSIS_BAD,
+    ELLIPSIS_OK as _ELLIPSIS_OK,
+    ROOT as _ROOT,
+)
+from pipeline.models import BatchOutcome, Cue, TranslateResult, ValidateReport
 
-# 省略号
-_ELLIPSIS_OK = "\u2026"  # …
-_ELLIPSIS_BAD = "\u22ef"  # ⋯
-
-
-@dataclass
-class Cue:
-    id: str
-    seq: int
-    start: str
-    end: str
-    text: str
-
-
-@dataclass
-class ValidateReport:
-    ok: bool
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    parsed: Optional[dict[str, dict[str, str]]] = None
-    stats: dict[str, int] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "ok": self.ok,
-            "errors": self.errors,
-            "warnings": self.warnings,
-            "stats": self.stats,
-            "parsed_keys": list(self.parsed.keys()) if self.parsed else [],
-        }
-
-
-@dataclass
-class TranslateResult:
-    model_alias: str
-    model_id: str
-    usage: Usage
-    status: str
-    incomplete_reason: Optional[str]
-    validate: ValidateReport
-    bilingual_srt: Optional[str]
-    raw_text: str
-    elapsed_sec: float
-    input_map: dict[str, str] = field(default_factory=dict)
-    instructions: str = ""
-    cues: list[Cue] = field(default_factory=list)
-    batch_count: int = 1
-    batch_size: int = 0
-    batch_jobs: int = 1
-    batch_reports: list[dict[str, Any]] = field(default_factory=list)
-    episode_summary: str = ""
-    summary_usage: Optional[Usage] = None
-
-    @property
-    def ok(self) -> bool:
-        return (
-            self.status == "completed"
-            and not self.incomplete_reason
-            and self.validate.ok
-            and bool(self.bilingual_srt)
-        )
-
-    def meta_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "model_alias": self.model_alias,
-            "model_id": self.model_id,
-            "status": self.status,
-            "incomplete_reason": self.incomplete_reason,
-            "elapsed_sec": round(self.elapsed_sec, 3),
-            "ok": self.ok,
-            "batch_count": self.batch_count,
-            "batch_size": self.batch_size,
-            "batch_jobs": self.batch_jobs,
-            "batch_reports": self.batch_reports,
-            "episode_summary_chars": len(self.episode_summary or ""),
-            "usage": {
-                "input_tokens": self.usage.input_tokens,
-                "output_tokens": self.usage.output_tokens,
-                "reasoning_tokens": self.usage.reasoning_tokens,
-                "total_tokens": self.usage.total_tokens,
-            },
-            "validate": self.validate.to_dict(),
-        }
-        if self.summary_usage is not None:
-            d["summary_usage"] = {
-                "input_tokens": self.summary_usage.input_tokens,
-                "output_tokens": self.summary_usage.output_tokens,
-                "reasoning_tokens": self.summary_usage.reasoning_tokens,
-                "total_tokens": self.summary_usage.total_tokens,
-            }
-        return d
+# re-export for callers
+__all__ = [
+    "Cue",
+    "ValidateReport",
+    "TranslateResult",
+    "parse_srt",
+    "run_once",
+    "repair_run_dir",
+    "self_check_offline",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -714,20 +638,6 @@ def _should_retry_result(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _BatchOutcome:
-    batch_index: int
-    cues: list[Cue]
-    input_map: dict[str, str]
-    raw_text: str
-    status: str
-    incomplete_reason: Optional[str]
-    usage: Usage
-    model_id: str
-    alias: str
-    validate: ValidateReport
-    attempt_notes: list[str] = field(default_factory=list)
-
 
 def _call_one_batch(
     *,
@@ -742,7 +652,7 @@ def _call_one_batch(
     max_retries: int,
     retry_backoff_sec: float,
     batch_out: Optional[Path],
-) -> _BatchOutcome:
+) -> BatchOutcome:
     """对一批 cue 调用模型（JSON 键使用全局 id）。"""
     input_json, input_map = build_input_json(batch_cues)
     if batch_out:
@@ -863,7 +773,7 @@ def _call_one_batch(
                 encoding="utf-8",
             )
 
-    return _BatchOutcome(
+    return BatchOutcome(
         batch_index=batch_index,
         cues=batch_cues,
         input_map=input_map,
@@ -1005,9 +915,9 @@ def run_once(
             encoding="utf-8",
         )
 
-    outcomes: list[_BatchOutcome] = []
+    outcomes: list[BatchOutcome] = []
 
-    def _run_idx(i: int) -> _BatchOutcome:
+    def _run_idx(i: int) -> BatchOutcome:
         bout = (out_path / f"batch_{i:02d}") if out_path else None
         return _call_one_batch(
             model=model,
@@ -1023,8 +933,8 @@ def run_once(
             batch_out=bout,
         )
 
-    def _run_many(indices: list[int], *, parallel: bool, label: str) -> dict[int, _BatchOutcome]:
-        out_map: dict[int, _BatchOutcome] = {}
+    def _run_many(indices: list[int], *, parallel: bool, label: str) -> dict[int, BatchOutcome]:
+        out_map: dict[int, BatchOutcome] = {}
         if not indices:
             return out_map
         if not parallel or len(indices) == 1:
@@ -1040,7 +950,7 @@ def run_once(
                     out_map[i] = fut.result()
                 except Exception as e:  # noqa: BLE001
                     _log(f"   ✗ batch {i:02d} worker 崩溃: {e}")
-                    out_map[i] = _BatchOutcome(
+                    out_map[i] = BatchOutcome(
                         batch_index=i,
                         cues=batches[i],
                         input_map={c.id: c.text for c in batches[i]},
