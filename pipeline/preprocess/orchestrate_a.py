@@ -93,7 +93,7 @@ def run_preprocess(
             from pipeline.preprocess.vc_optimize_adapter import optimize_document
 
             document, opt_meta = optimize_document(document, model=config.model)
-            meta["backends"]["optimize"] = "pipeline.vc_optimize"
+            meta["backends"]["optimize"] = "pipeline.preprocess.vc_optimize_adapter"
             meta["notes"].extend(opt_meta.get("notes") or [])
         except Exception as e:  # noqa: BLE001
             meta["notes"].append(f"optimize skipped: {type(e).__name__}: {e}")
@@ -129,7 +129,7 @@ def run_preprocess(
                 document, sp_meta = resplit_with_vc(
                     document, words_path=Path(config.words_path), model=config.model
                 )
-                meta["backends"]["resplit"] = "pipeline.vc_split"
+                meta["backends"]["resplit"] = "pipeline.preprocess.vc_split_adapter"
                 meta["notes"].extend(sp_meta.get("notes") or [])
             except Exception as e:  # noqa: BLE001
                 meta["notes"].append(f"vc_split failed, fallback rules: {e}")

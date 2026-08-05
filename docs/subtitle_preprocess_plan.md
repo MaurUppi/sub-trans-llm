@@ -117,6 +117,20 @@ pipeline/
 
 ### 3.2 VideoCaptioner「四、相关文件速查」→ 本仓库映射
 
+> **实际落地结果（2026-08-05 修订）**：下表是最初的 vendoring 计划。实施后发现
+> vendored 的 `.py` 全部无法 import（依赖上游的 `videocaptioner.*` / `pipeline.llm` /
+> `json_repair` / `langdetect`），且它们走的是 **Chat Completions**，与本仓库统一的
+> Responses API 关思考机制不兼容。因此已删除全部 vendored Python，**只保留 prompt**：
+>
+> | 现存路径 | 用途 |
+> |---|---|
+> | `pipeline/prompts/split/sentence.md` | 断句 system prompt（`vc_split_adapter` 使用） |
+> | `pipeline/prompts/split/semantic.md` | 语义分段，保留未接入 |
+> | `pipeline/prompts/optimize/subtitle.md` | 优化 system prompt（`vc_optimize_adapter` 使用） |
+>
+> 断句/优化逻辑由 `pipeline/preprocess/vc_split_adapter.py`、`vc_optimize_adapter.py`
+> 自行实现，模型访问一律经 `model_client.call`（Responses API）。
+
 依据 `VideoCaptioner-SubtitleSpliter-Study.md` §四：
 
 | 上游路径 | 作用 | 本仓库落点 |

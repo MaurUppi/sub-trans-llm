@@ -13,7 +13,7 @@ import model_client
 from pipeline.logging_util import log
 from pipeline.rules.sub_processor import SRTDocument, SubtitleBlock
 
-_PROMPT = Path(__file__).resolve().parents[1] / "vc_optimize" / "prompts" / "subtitle.md"
+_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "optimize" / "subtitle.md"
 
 
 def optimize_document(

@@ -1,6 +1,7 @@
 """Semantic resplit adapter inspired by VideoCaptioner Split.
 
-Full vendored sources live in pipeline/vc_split/. This adapter provides a
+Only the prompt is borrowed (pipeline/prompts/split/sentence.md); all model
+access goes through model_client (Responses API). This adapter provides a
 pragmatic integration: optional LLM <br> boundaries on flat text + proportional
 timing (when no word-level timestamps), or word-JSON alignment when provided.
 """
@@ -22,7 +23,7 @@ from pipeline.rules.sub_processor import (
     TimeCode,
 )
 
-_PROMPT = Path(__file__).resolve().parents[1] / "vc_split" / "prompts" / "sentence.md"
+_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "split" / "sentence.md"
 
 
 def resplit_with_vc(
