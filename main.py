@@ -131,8 +131,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
         max_retries=args.max_retries,
         retry_backoff_sec=args.retry_backoff,
         sub_batch_size=getattr(args, "sub_batch_size", 10),
-        temperature=getattr(args, "temperature", None),
-        top_p=getattr(args, "top_p", None),
+        temperature=_sampling_from_args(args)[0],  # type: ignore[arg-type]
+        top_p=_sampling_from_args(args)[1],  # type: ignore[arg-type]
     )
     print(
         f"{'OK' if r.ok else 'FAIL'} repair {run_dir} "
@@ -180,6 +180,30 @@ def _maybe_preprocess(args: argparse.Namespace) -> Path:
     return pr.clean_srt_path
 
 
+def _sampling_from_args(args: argparse.Namespace) -> tuple[object, object]:
+    """Map CLI --temperature/--no-temp (and top_p) to model_client args.
+
+    ``None`` → resolve from .env / fallback 1.0.
+    ``OMIT`` → never send the field (provider default).
+    """
+    temp: object = model_client.OMIT if getattr(args, "no_temp", False) else getattr(
+        args, "temperature", None
+    )
+    top_p: object = model_client.OMIT if getattr(args, "no_top_p", False) else getattr(
+        args, "top_p", None
+    )
+    return temp, top_p
+
+
+def _fmt_sampling(args: argparse.Namespace) -> str:
+    t, p = _sampling_from_args(args)
+    def one(v: object) -> str:
+        if v is model_client.OMIT:
+            return "OMIT"
+        return str(v)
+    return f"temp={one(t)} top_p={one(p)}"
+
+
 def _run_one(
     model: str,
     args: argparse.Namespace,
@@ -187,6 +211,7 @@ def _run_one(
 ) -> translate.TranslateResult:
     model_out = out_dir / model.replace("/", "_")
     srt_path = Path(getattr(args, "_resolved_srt", None) or args.srt)
+    temperature, top_p = _sampling_from_args(args)
     return translate.run_once(
         srt_path=srt_path,
         model=model,
@@ -204,8 +229,8 @@ def _run_one(
         batch_size=getattr(args, "batch_size", 50),
         batch_jobs=getattr(args, "batch_jobs", 1),
         use_episode_summary=not getattr(args, "no_summary", False),
-        temperature=getattr(args, "temperature", None),
-        top_p=getattr(args, "top_p", None),
+        temperature=temperature,  # type: ignore[arg-type]
+        top_p=top_p,  # type: ignore[arg-type]
     )
 
 
@@ -304,8 +329,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(
         f"run: model={args.model} batch_size={args.batch_size} "
         f"batch_jobs={args.batch_jobs} "
-        f"temp={getattr(args, 'temperature', None)} "
-        f"top_p={getattr(args, 'top_p', None)} "
+        f"{_fmt_sampling(args)} "
         f"preprocess={bool(getattr(args, 'preprocess', False))} out={out_dir}"
     )
     code = _dispatch(models, args, out_dir)
@@ -483,18 +507,31 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="跳过通读摘要（默认开启：全量字幕→摘要→注入各批 instructions）",
         )
-        sp.add_argument(
+        tg = sp.add_mutually_exclusive_group()
+        tg.add_argument(
             "--temperature",
             type=float,
             default=None,
-            help="采样温度（默认读 .env DEFAULT_TEMPERATURE=1.0）",
+            help="采样温度（默认读 .env DEFAULT_TEMPERATURE；缺省 1.0）",
         )
-        sp.add_argument(
+        tg.add_argument(
+            "--no-temp",
+            action="store_true",
+            help="不向 API 传 temperature（服务端默认；与 --temperature 互斥）",
+        )
+        pg = sp.add_mutually_exclusive_group()
+        pg.add_argument(
             "--top-p",
             type=float,
             default=None,
             dest="top_p",
-            help="nucleus top_p（默认读 .env DEFAULT_TOP_P=1.0）",
+            help="nucleus top_p（默认读 .env DEFAULT_TOP_P；缺省 1.0）",
+        )
+        pg.add_argument(
+            "--no-top-p",
+            action="store_true",
+            dest="no_top_p",
+            help="不向 API 传 top_p（服务端默认；与 --top-p 互斥）",
         )
 
     sp = sub.add_parser("ping", help="最少 token 连通六模型")

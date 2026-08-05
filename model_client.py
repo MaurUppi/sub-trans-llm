@@ -9,15 +9,17 @@
 
 约定：
   - 强制关闭思考
-  - temperature / top_p 默认 1.0（可被 .env 覆盖）
+  - temperature / top_p：未传时读 .env（默认 1.0）；``omit``/``OMIT`` 则不传给 API
   - Responses API
   - max_output_tokens 可选
 
 用法::
 
-    from model_client import call, list_models
+    from model_client import call, list_models, OMIT
 
     r = call("deepseek-v4-flash", "Reply with exactly: OK", max_output_tokens=16)
+    # 强制不传采样参数（用服务端默认）：
+    # r = call(..., temperature=OMIT, top_p=OMIT)
     print(r.text, r.usage)
 """
 
@@ -26,9 +28,26 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from openai import OpenAI
+
+# ---------------------------------------------------------------------------
+# Sampling: explicit value | None (→ .env / fallback) | OMIT (never send)
+# ---------------------------------------------------------------------------
+
+
+class _OmitType:
+    """Sentinel: do not include this sampling field in the API request."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "OMIT"
+
+
+OMIT = _OmitType()
+SamplingArg = Union[float, None, _OmitType]
 
 # ---------------------------------------------------------------------------
 # 加载 .env（不依赖系统全局环境，优先项目根目录）
@@ -88,11 +107,58 @@ def _env_float(name: str, default: float) -> float:
     return float(raw)
 
 
+def _env_float_optional(name: str) -> Optional[float]:
+    """Read float from env; treat omit/none/empty as None (do not send to API)."""
+    raw = _env(name)
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if s in ("", "omit", "none", "api", "default"):
+        return None
+    return float(raw)
+
+
 def _env_int_optional(name: str) -> Optional[int]:
     raw = _env(name)
     if raw is None:
         return None
     return int(raw)
+
+
+def _resolve_sampling_param(
+    explicit: SamplingArg,
+    env_name: str,
+    *,
+    fallback: Optional[float] = 1.0,
+) -> Optional[float]:
+    """
+    Resolve temperature / top_p to a value sent on the wire, or None to omit.
+
+    - ``OMIT`` → None (never send; provider/model default)
+    - explicit float → that value
+    - explicit None → read env:
+        * numeric → use it
+        * omit/none/empty/api/default → None
+        * env missing → ``fallback`` (historically 1.0; None means omit)
+    """
+    if explicit is OMIT:
+        return None
+    if explicit is not None:
+        return float(explicit)
+    from_env = _env_float_optional(env_name)
+    if from_env is not None:
+        return from_env
+    # env key present as omit → _env_float_optional returns None while key exists
+    raw = _env(env_name)
+    if raw is not None and str(raw).strip().lower() in (
+        "",
+        "omit",
+        "none",
+        "api",
+        "default",
+    ):
+        return None
+    return fallback
 
 
 # 阿里云 Responses API：max_output_tokens 下限为 16（实测 5 会 400）
@@ -241,8 +307,8 @@ def call(
     input: str | list[dict[str, Any]],
     *,
     instructions: Optional[str] = None,
-    temperature: Optional[float] = None,
-    top_p: Optional[float] = None,
+    temperature: SamplingArg = None,
+    top_p: SamplingArg = None,
     max_output_tokens: Optional[int] = None,
     timeout: float = 120.0,
     extra: Optional[dict[str, Any]] = None,
@@ -258,6 +324,9 @@ def call(
         字符串，或 OpenAI Responses 消息数组。
     instructions :
         可选系统指令（Responses 的 instructions 字段）。
+    temperature / top_p :
+        采样参数。``None`` 时读 ``DEFAULT_TEMPERATURE`` / ``DEFAULT_TOP_P``
+        （缺省 1.0）；传 ``OMIT`` 或 env 设为 ``omit`` 则不写入请求。
     max_output_tokens :
         输出上限（含 reasoning tokens）。
         ``None`` 时先读 ``DEFAULT_MAX_OUTPUT_TOKENS``，仍为空则不传（服务端默认）。
@@ -266,19 +335,20 @@ def call(
     cfg = resolve_model(model)
     client = _build_client(cfg, timeout=timeout)
 
-    if temperature is None:
-        temperature = _env_float("DEFAULT_TEMPERATURE", 1.0)
-    if top_p is None:
-        top_p = _env_float("DEFAULT_TOP_P", 1.0)
+    temperature = _resolve_sampling_param(temperature, "DEFAULT_TEMPERATURE", fallback=1.0)
+    top_p = _resolve_sampling_param(top_p, "DEFAULT_TOP_P", fallback=1.0)
     if max_output_tokens is None:
         max_output_tokens = _env_int_optional("DEFAULT_MAX_OUTPUT_TOKENS")
 
     kwargs: dict[str, Any] = {
         "model": cfg["model"],
         "input": input,
-        "temperature": temperature,
-        "top_p": top_p,
     }
+    # Only send sampling params when resolved; None = provider/model default
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if top_p is not None:
+        kwargs["top_p"] = top_p
     if instructions is not None:
         kwargs["instructions"] = instructions
 
