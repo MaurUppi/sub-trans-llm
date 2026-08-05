@@ -108,6 +108,37 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repair(args: argparse.Namespace) -> int:
+    """对已有 run 目录重跑失败批并合并。"""
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        # allow parent that contains model subdir
+        if (run_dir / args.model).is_dir():
+            run_dir = run_dir / args.model
+        else:
+            print(f"run dir not found: {run_dir}", file=sys.stderr)
+            return 2
+    indices = None
+    if args.batches:
+        indices = [int(x) for x in args.batches.split(",") if x.strip() != ""]
+    r = translate.repair_run_dir(
+        run_dir=run_dir,
+        srt_path=Path(args.srt),
+        model=args.model,
+        batch_indices=indices,
+        max_output_tokens=args.max_output_tokens or 8192,
+        timeout=args.timeout or 300.0,
+        max_retries=args.max_retries,
+        retry_backoff_sec=args.retry_backoff,
+    )
+    print(
+        f"{'OK' if r.ok else 'FAIL'} repair {run_dir} "
+        f"merged={r.validate.stats.get('n_out')}/{r.validate.stats.get('n_in')} "
+        f"err={r.validate.errors[:2]}"
+    )
+    return 0 if r.ok else 1
+
+
 def _run_one(
     model: str,
     args: argparse.Namespace,
@@ -323,6 +354,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("selfcheck", help="离线自检 parse/validate/srt")
     add_common(sp)
     sp.set_defaults(func=cmd_selfcheck)
+
+    sp = sub.add_parser(
+        "repair",
+        help="重跑已有 run 目录中的失败批并合并（可先离线 JSON 加固）",
+    )
+    add_common(sp)
+    sp.add_argument(
+        "--run-dir",
+        required=True,
+        help="模型输出目录（含 input.json/batch_XX），或含模型子目录的父目录",
+    )
+    sp.add_argument(
+        "--model",
+        required=True,
+        help="模型 alias（用于 API 重跑；离线恢复时也需提供）",
+    )
+    sp.add_argument(
+        "--batches",
+        default=None,
+        help="逗号分隔批号，如 2,4；默认自动从 meta 失败批/缺键推断",
+    )
+    sp.set_defaults(func=cmd_repair)
 
     sp = sub.add_parser("smoke", help="小规模烟测（默认前 8 条）")
     add_common(sp)

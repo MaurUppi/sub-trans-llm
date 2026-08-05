@@ -441,6 +441,86 @@ def _norm_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def repair_model_json(text: str) -> tuple[Optional[Any], list[str]]:
+    """
+    尝试解析模型 JSON；对常见畸形做加固修复。
+
+    Returns (data_or_None, repair_notes)
+    """
+    notes: list[str] = []
+    if not text or not str(text).strip():
+        return None, ["empty"]
+
+    s = _strip_code_fence(text)
+
+    def _try(s0: str) -> Optional[Any]:
+        try:
+            return json.loads(s0)
+        except json.JSONDecodeError:
+            return None
+
+    data = _try(s)
+    if data is not None:
+        return data, notes
+
+    # 1) 数字键缺左引号： ,201": 或 {201":  → ,"201": / {"201":
+    s1 = re.sub(r"([,{])\s*(\d+)\s*\":", r'\1"\2":', s)
+    if s1 != s:
+        notes.append("fixed unquoted numeric keys")
+        data = _try(s1)
+        if data is not None:
+            return data, notes
+        s = s1
+
+    # 2) 根对象缺收尾花括号（常见截断）
+    open_b = s.count("{") - s.count("}")
+    if open_b > 0:
+        s2 = s + ("}" * open_b)
+        notes.append(f"appended {open_b} closing brace(s)")
+        data = _try(s2)
+        if data is not None:
+            return data, notes
+        s = s2
+
+    # 3) 截断在字符串中间：回退到最后一个完整 "}," 或 "}
+    #    并闭合根对象
+    for pat in (r"\}\s*,\s*$", r"\}\s*$"):
+        m = None
+        # find last complete entry end
+        idx = s.rfind('"},')
+        if idx < 0:
+            idx = s.rfind('"}')
+        if idx > 0:
+            s3 = s[: idx + 2]  # include "}
+            # ensure root closed
+            ob = s3.count("{") - s3.count("}")
+            if ob > 0:
+                s3 = s3 + ("}" * ob)
+            # if ends with }, remove trailing comma before close
+            s3 = re.sub(r",\s*}+\s*$", lambda m: "}" * (m.group(0).count("}")), s3)
+            # simpler: strip trailing commas before }
+            s3 = re.sub(r",(\s*})", r"\1", s3)
+            data = _try(s3)
+            if data is not None:
+                notes.append("truncated to last complete object entry")
+                return data, notes
+
+    # 4) 再试：去掉尾部不完整 key 片段
+    idx = s.rfind(",\"")
+    if idx > 0:
+        s4 = s[:idx] + "}"
+        ob = s4.count("{") - s4.count("}")
+        if ob > 0:
+            s4 += "}" * ob
+        s4 = re.sub(r",(\s*})", r"\1", s4)
+        data = _try(s4)
+        if data is not None:
+            notes.append("dropped trailing incomplete entry")
+            return data, notes
+
+    return None, notes + ["unrecoverable json"]
+
+
 def validate_response(raw: str, input_map: dict[str, str]) -> ValidateReport:
     errors: list[str] = []
     warnings: list[str] = []
@@ -456,14 +536,23 @@ def validate_response(raw: str, input_map: dict[str, str]) -> ValidateReport:
             ok=False, errors=["empty response"], stats=stats
         )
 
-    cleaned = _strip_code_fence(raw)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
+    data, repair_notes = repair_model_json(raw)
+    for n in repair_notes:
+        if n not in ("empty", "unrecoverable json"):
+            warnings.append(f"json repair: {n}")
+    if data is None:
+        # keep legacy error shape for logs
+        try:
+            json.loads(_strip_code_fence(raw))
+        except json.JSONDecodeError as e:
+            return ValidateReport(
+                ok=False,
+                errors=[f"json.loads failed: {e}"]
+                + ([f"repair notes: {repair_notes}"] if repair_notes else []),
+                stats=stats,
+            )
         return ValidateReport(
-            ok=False,
-            errors=[f"json.loads failed: {e}"],
-            stats=stats,
+            ok=False, errors=["json parse failed"], stats=stats
         )
 
     if not isinstance(data, dict):
@@ -934,21 +1023,24 @@ def run_once(
             batch_out=bout,
         )
 
-    if jobs == 1 or n_batches == 1:
-        for i in range(n_batches):
-            outcomes.append(_run_idx(i))
-    else:
-        _log(f"   ⚡ 并行发送 {n_batches} 批（workers={jobs}）…")
-        with ThreadPoolExecutor(max_workers=min(jobs, n_batches)) as ex:
-            futs = {ex.submit(_run_idx, i): i for i in range(n_batches)}
-            tmp: dict[int, _BatchOutcome] = {}
+    def _run_many(indices: list[int], *, parallel: bool, label: str) -> dict[int, _BatchOutcome]:
+        out_map: dict[int, _BatchOutcome] = {}
+        if not indices:
+            return out_map
+        if not parallel or len(indices) == 1:
+            for i in indices:
+                out_map[i] = _run_idx(i)
+            return out_map
+        _log(f"   ⚡ {label} 并行 {len(indices)} 批（workers={min(jobs, len(indices))}）…")
+        with ThreadPoolExecutor(max_workers=min(jobs, len(indices))) as ex:
+            futs = {ex.submit(_run_idx, i): i for i in indices}
             for fut in as_completed(futs):
                 i = futs[fut]
                 try:
-                    tmp[i] = fut.result()
+                    out_map[i] = fut.result()
                 except Exception as e:  # noqa: BLE001
                     _log(f"   ✗ batch {i:02d} worker 崩溃: {e}")
-                    tmp[i] = _BatchOutcome(
+                    out_map[i] = _BatchOutcome(
                         batch_index=i,
                         cues=batches[i],
                         input_map={c.id: c.text for c in batches[i]},
@@ -958,12 +1050,42 @@ def run_once(
                         usage=Usage(),
                         model_id="",
                         alias=model,
-                        validate=ValidateReport(
-                            ok=False, errors=[str(e)]
-                        ),
+                        validate=ValidateReport(ok=False, errors=[str(e)]),
                     )
-            outcomes = [tmp[i] for i in range(n_batches)]
+        return out_map
 
+    # 第一波：顺序或并行
+    first = _run_many(
+        list(range(n_batches)),
+        parallel=(jobs > 1 and n_batches > 1),
+        label="首轮",
+    )
+    outcomes_map = dict(first)
+
+    # 失败批重跑（并行首轮后必做；顺序首轮也做一次，提高稳健性）
+    failed_idx = sorted(i for i, oc in outcomes_map.items() if not oc.validate.ok)
+    if failed_idx:
+        _log(
+            f"🔄 失败批重跑（顺序）: {failed_idx} "
+            f"（共 {len(failed_idx)}/{n_batches}）"
+        )
+        # 失败批默认顺序，降低限流/审核叠加；仍走各自 max_retries
+        retry_map = _run_many(failed_idx, parallel=False, label="失败重跑")
+        for i, oc in retry_map.items():
+            # 累加 usage：保留两轮 usage 之和
+            prev = outcomes_map[i]
+            oc.usage = sum_usage([prev.usage, oc.usage])
+            if oc.validate.ok:
+                oc.validate.warnings.append(
+                    f"batch {i:02d}: recovered on failure re-run"
+                )
+            else:
+                oc.validate.warnings.append(
+                    f"batch {i:02d}: still failing after re-run"
+                )
+            outcomes_map[i] = oc
+
+    outcomes = [outcomes_map[i] for i in range(n_batches)]
     elapsed = time.perf_counter() - t0
 
     # 合并
@@ -1131,6 +1253,10 @@ def _write_outputs(out_dir: Path, result: TranslateResult, input_json: str) -> N
         (out_dir / "bilingual.srt").write_text(
             result.bilingual_srt, encoding="utf-8"
         )
+        # 成功则移除 partial 提示
+        partial = out_dir / "bilingual.PARTIAL.txt"
+        if partial.exists():
+            partial.unlink()
     else:
         # 失败时写 partial 占位说明
         (out_dir / "bilingual.PARTIAL.txt").write_text(
@@ -1138,6 +1264,232 @@ def _write_outputs(out_dir: Path, result: TranslateResult, input_json: str) -> N
             "See validate.json / raw_output.txt / meta.json\n",
             encoding="utf-8",
         )
+
+
+def repair_run_dir(
+    run_dir: Path | str,
+    srt_path: Path | str,
+    model: str,
+    *,
+    batch_indices: Optional[list[int]] = None,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    timeout: float = 300.0,
+    max_retries: int = 2,
+    retry_backoff_sec: float = 3.0,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+) -> TranslateResult:
+    """
+    对已有 run 目录只重跑失败批（或指定 batch_indices），合并进 parsed.json 并尝试生成 bilingual.srt。
+
+    需要目录内已有: input.json, instructions.txt；建议有 meta.json / parsed.json。
+    """
+    run_dir = Path(run_dir)
+    srt_path = Path(srt_path)
+    if not (run_dir / "input.json").is_file():
+        raise FileNotFoundError(f"missing input.json in {run_dir}")
+    if not (run_dir / "instructions.txt").is_file():
+        raise FileNotFoundError(f"missing instructions.txt in {run_dir}")
+
+    full_input_map: dict[str, str] = json.loads(
+        (run_dir / "input.json").read_text(encoding="utf-8")
+    )
+    instructions = (run_dir / "instructions.txt").read_text(encoding="utf-8")
+
+    # 从 SRT 重建 cues（全局 reindex 后按 input 键过滤）
+    all_cues = reindex_cues(parse_srt(srt_path))
+    # 若 run 是 max_cues 切片，input 键为 0..n-1
+    cues = [c for c in all_cues if c.id in full_input_map]
+    if len(cues) != len(full_input_map):
+        # 仅用 input 文本 + 时间码尽量匹配
+        by_id = {c.id: c for c in all_cues}
+        cues = []
+        for kid, text in sorted(
+            full_input_map.items(), key=lambda x: int(x[0]) if x[0].isdigit() else x[0]
+        ):
+            if kid in by_id:
+                cues.append(by_id[kid])
+            else:
+                cues.append(
+                    Cue(id=kid, seq=int(kid) if kid.isdigit() else 0, start="00:00:00,000", end="00:00:00,000", text=text)
+                )
+
+    meta_path = run_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+    batch_size = int(meta.get("batch_size") or DEFAULT_BATCH_SIZE)
+    batches = chunk_cues(cues, batch_size)
+    n_batches = len(batches)
+
+    existing: dict[str, dict[str, str]] = {}
+    parsed_path = run_dir / "parsed.json"
+    if parsed_path.is_file():
+        existing = json.loads(parsed_path.read_text(encoding="utf-8"))
+
+    # 判定失败批
+    if batch_indices is None:
+        failed: list[int] = []
+        reports = meta.get("batch_reports") or []
+        if reports:
+            for br in reports:
+                if not br.get("ok"):
+                    failed.append(int(br["batch_index"]))
+        else:
+            missing = set(full_input_map) - set(existing)
+            for mid in missing:
+                try:
+                    failed.append(int(mid) // batch_size)
+                except ValueError:
+                    pass
+            failed = sorted(set(failed))
+        batch_indices = failed
+
+    batch_indices = sorted(set(int(i) for i in batch_indices))
+    _log(f"🔧 repair_run_dir {run_dir.name} re-run batches={batch_indices}")
+
+    # 先对已有 raw 尝试 JSON 加固解析（免 API）
+    recovered_offline: list[int] = []
+    for i in list(batch_indices):
+        raw_p = run_dir / f"batch_{i:02d}" / "raw_output.txt"
+        if not raw_p.is_file():
+            continue
+        raw = raw_p.read_text(encoding="utf-8")
+        input_map = {c.id: c.text for c in batches[i]} if i < len(batches) else {}
+        if not input_map and (run_dir / f"batch_{i:02d}" / "input.json").is_file():
+            input_map = json.loads(
+                (run_dir / f"batch_{i:02d}" / "input.json").read_text(encoding="utf-8")
+            )
+        vr = validate_response(raw, input_map)
+        if vr.ok and vr.parsed:
+            _log(f"   ✓ batch {i:02d} 离线 JSON 加固恢复 {len(vr.parsed)} keys")
+            existing.update(vr.parsed)
+            recovered_offline.append(i)
+            (run_dir / f"batch_{i:02d}" / "parsed.json").write_text(
+                json.dumps(vr.parsed, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (run_dir / f"batch_{i:02d}" / "validate.json").write_text(
+                json.dumps(vr.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+    need_api = [i for i in batch_indices if i not in recovered_offline]
+    usages = [Usage()]
+    t0 = time.perf_counter()
+    for i in need_api:
+        if i < 0 or i >= n_batches:
+            _log(f"   skip invalid batch index {i}")
+            continue
+        bout = run_dir / f"batch_{i:02d}"
+        oc = _call_one_batch(
+            model=model,
+            batch_index=i,
+            batch_cues=batches[i],
+            instructions=instructions,
+            max_output_tokens=max_output_tokens,
+            timeout=timeout,
+            temperature=temperature,
+            top_p=top_p,
+            max_retries=max_retries,
+            retry_backoff_sec=retry_backoff_sec,
+            batch_out=bout,
+        )
+        usages.append(oc.usage)
+        if oc.validate.ok and oc.validate.parsed:
+            existing.update(oc.validate.parsed)
+            _log(f"   ✓ batch {i:02d} API 重跑成功")
+        else:
+            _log(f"   ✗ batch {i:02d} API 重跑仍失败: {oc.validate.errors[:2]}")
+
+    elapsed = time.perf_counter() - t0
+    missing = sorted(
+        set(full_input_map) - set(existing),
+        key=lambda x: int(x) if x.isdigit() else x,
+    )
+    overall_ok = len(missing) == 0 and len(existing) == len(full_input_map)
+    errors = []
+    if missing:
+        errors.append(
+            "still missing keys: "
+            + ", ".join(missing[:40])
+            + (f" ...(+{len(missing)-40})" if len(missing) > 40 else "")
+        )
+
+    bilingual = None
+    if overall_ok:
+        tr_map = {k: v["tr"] for k, v in existing.items()}
+        bilingual = build_bilingual_srt(cues, tr_map)
+
+    # 更新 batch_reports ok flags where possible
+    reports = meta.get("batch_reports") or []
+    for br in reports:
+        bi = int(br["batch_index"])
+        if bi in recovered_offline or bi in need_api:
+            # recompute ok from keys coverage
+            ids = {c.id for c in batches[bi]} if bi < len(batches) else set()
+            br["ok"] = ids.issubset(set(existing.keys()))
+            if br["ok"]:
+                br["errors"] = []
+                br["n_tr_ok"] = len(ids)
+                br["status"] = "completed"
+
+    vr = ValidateReport(
+        ok=overall_ok,
+        errors=errors,
+        warnings=[f"offline recovered batches: {recovered_offline}"]
+        if recovered_offline
+        else [],
+        parsed=existing if existing else None,
+        stats={
+            "n_in": len(full_input_map),
+            "n_out": len(existing),
+            "n_tr_ok": sum(1 for v in existing.values() if (v.get("tr") or "").strip()),
+            "n_batches": n_batches,
+            "n_batches_ok": sum(1 for br in reports if br.get("ok"))
+            if reports
+            else (n_batches if overall_ok else 0),
+        },
+    )
+    usage = sum_usage(usages)
+    result = TranslateResult(
+        model_alias=model,
+        model_id=str(meta.get("model_id") or ""),
+        usage=usage,
+        status="completed" if overall_ok else f"error: missing {len(missing)} keys",
+        incomplete_reason=None,
+        validate=vr,
+        bilingual_srt=bilingual,
+        raw_text="",
+        elapsed_sec=elapsed,
+        input_map=full_input_map,
+        instructions=instructions,
+        cues=cues,
+        batch_count=n_batches,
+        batch_size=batch_size,
+        batch_jobs=int(meta.get("batch_jobs") or 1),
+        batch_reports=reports,
+        episode_summary=(
+            (run_dir / "episode_summary.txt").read_text(encoding="utf-8")
+            if (run_dir / "episode_summary.txt").is_file()
+            else ""
+        ),
+    )
+    # preserve previous total usage if present
+    if meta.get("usage") and overall_ok:
+        prev_u = meta["usage"]
+        result.usage = Usage(
+            input_tokens=int(prev_u.get("input_tokens") or 0)
+            + usage.input_tokens,
+            output_tokens=int(prev_u.get("output_tokens") or 0)
+            + usage.output_tokens,
+            reasoning_tokens=int(prev_u.get("reasoning_tokens") or 0)
+            + usage.reasoning_tokens,
+            total_tokens=int(prev_u.get("total_tokens") or 0) + usage.total_tokens,
+        )
+
+    _write_outputs(run_dir, result, json.dumps(full_input_map, ensure_ascii=False, separators=(",", ":")))
+    if overall_ok:
+        _log(f"✅ repair 完成 → bilingual.srt keys={len(existing)}")
+    else:
+        _log(f"❌ repair 仍缺 {len(missing)} keys: {missing[:20]}")
+    return result
 
 
 def self_check_offline(srt_path: Path | str) -> None:
