@@ -13,11 +13,27 @@ https://console.volcengine.com/ark/region:cn-beijing/model/detail?name=glm-5-2
 https://console.volcengine.com/ark/region:cn-beijing/model/detail?name=deepseek-v4-pro
 https://console.volcengine.com/ark/region:cn-beijing/model/detail?name=deepseek-v4-flash
 
+
 # Aliyun
 https://www.qianwenai.com/models/qwen3.8-max
 https://www.qianwenai.com/models/qwen3.7-plus
 https://www.qianwenai.com/models/qwen3.7-max
+OpenAI Responses接口兼容: "https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api"
+结构化输出:"https://help.aliyun.com/zh/model-studio/qwen-structured-output"
 ```
+
+本地留存的官方文档（结论以这些为准，2026-08-05 复核）：
+
+- `docs/火山方舟_结构化输出(beta)_1782549049.pdf`
+- `docs/火山方舟_创建Response_1784703795.pdf`
+- `docs/阿里云-结构化输出.md`
+- `docs/阿里云-OpenAI兼容-Responses.md`
+- `docs/阿里云-OpenAI兼容-Responses创建响应.md`（参数表最权威，含「未列出参数一律忽略」原则）
+
+> base_url 备注：阿里云新文档一律给业务空间维度地址
+> `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`，
+> 本项目 `.env` 用的是旧的 `https://dashscope.aliyuncs.com/compatible-mode/v1`，
+> 六模型实测仍可用，暂不改动；若将来报鉴权/路由错误，先查这一条。
 
 ## .env 字段说明
 ```
@@ -33,10 +49,123 @@ MODEL_QWEN37_PLUS=qwen3.7-plus
 MODEL_QWEN37_MAX=qwen3.7-max
 MODEL_QWEN38_MAX=qwen3.8-max
 
-DEFAULT_TEMPERATURE=1.0
-DEFAULT_TOP_P=1.0
 DEFAULT_MAX_OUTPUT_TOKENS=   # 可留空
 ```
+
+### 采样参数：默认不发送（2026-08-05 变更）
+
+`temperature` / `top_p` **不再从 `.env` 读取**，默认也**不写入请求体**，直接用服务端默认。
+要调就在命令行显式给值：
+
+```bash
+python3 main.py run --model qwen3.8-max in.srt --temperature 0.2 --top-p 0.8
+```
+
+- `.env` 的 `DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P` 已废弃，留着也不生效。
+- `--no-temp` / `--no-top-p` 两个开关已删除——现在「不传」就是默认，不需要开关。
+- 理由：采样条件藏在 `.env` 里会让六模型对比实验的变量不可见且容易漂移；
+  显式写在命令行里，run 的 meta 里也留得下痕迹。
+- `0` 是合法值，会照发，不会被当成「没给」。
+
+### 官方对 temperature / top_p 的定位（2026-08-06 补记）
+
+两家都支持这两个参数，且**都不是被静默忽略的那一类**——阿里云 Responses
+「创建响应」参数表明确列出了 `temperature` 与 `top_p`（对照 `response_format`
+根本没出现在表里，属于文档开头「未提及的参数会被忽略」的范围）。
+
+| 参数 | Ark（火山方舟） | 阿里云（百炼） |
+|---|---|---|
+| `temperature` | 0 – 2.0 | \[0, 2) |
+| `top_p` | 0 – 1.0 | (0, 1.0\] |
+
+**两家口径一致：建议只设其中一个。** 阿里云在参数表两处、以及《文本生成-概述》
+「控制回复多样性」一节都写了「为准确评估参数效果，建议每次只调整一个」。
+理由是两者都作用在同一个 token 概率分布上，叠加后效果无法归因。
+
+#### 官方按场景的 temperature 建议
+
+阿里云《文本生成-概述》给出的 `SCENARIO_CONFIGS`：
+
+| 场景 | temperature | top_p |
+|---|---|---|
+| 创造性写作 | 0.9 | 0.95 |
+| 代码生成 | 0.2 | 0.8 |
+| 事实性问答 | 0.1 | 0.7 |
+| **翻译** | **0.3** | **0.8** |
+
+火山方舟《语言模型》只给定性描述，方向一致：低温「严谨保守，适合有标准答案的
+任务，如事实问答、代码生成、逻辑推理」；高温「随机、有创意，适合写诗歌故事」。
+字幕翻译属于前者一侧但需保留口语自然度，**0.3 是合理起点**。
+
+#### 是否移除 `top_p`？——不移除，改为警告
+
+官方建议「只设其一」，但代码里删掉 `top_p` 是过度反应：
+
+1. 官方自己的 `SCENARIO_CONFIGS` 翻译档就同时给了 (0.3, 0.8)。硬互斥会让
+   **官方推荐配置无法复现**。
+2. 六模型质量消融需要自由度。删掉一个参数就等于替未来的实验做了决定。
+3. 两个 API 都合法接受，删掉是本地自我设限，不是遵从文档。
+
+因此保留两个参数，**同时显式指定时在 stderr 打一条警告**
+（`main.warn_if_both_sampling`），把官方建议传达到位而不阻断。
+日常用法：**只调 `--temperature`，`top_p` 留给服务端默认。**
+
+```bash
+# 推荐（翻译场景）
+python3 main.py run --model qwen3.8-max in.srt --temperature 0.3
+# 复现官方配置：可行，但会打一条 warning
+python3 main.py run --model qwen3.8-max in.srt --temperature 0.3 --top-p 0.8
+```
+
+## 输出校验：契约 vs 成片质量（2026-08-05 新增）
+
+结构化输出既然不用（见下文调查结论），格式与对齐就全靠本地校验。两层分工不同：
+
+| 层 | 模块 | 违反后果 |
+|---|---|---|
+| **契约** | `pipeline/validate.py` + `pipeline/src_align.py` | error → 触发重试 / 拆批 |
+| **成片质量** | `pipeline/subtitle_check.py` | 只度量，不阻断 |
+
+### src 回显对齐（原 warning，已改为 error）
+
+成片原文**始终取本地 `Cue.text`**，模型回显的 `src` 从不进产物——所以 `src` 唯一的
+用途就是验证「这条译文确实对应这条原文」。**字幕翻译最危险的事故是整批错位**：
+键齐全、`tr` 非空、JSON 合法，但第 37 条的译文其实是第 36 条的。
+`json_schema` / `json_object` 对此**零作用**，只能靠回显比对。
+
+原实现把不匹配一律记为 warning，`ok` 仍为 True，错位会直接进 `bilingual.srt`。
+现按严重度分级（`pipeline/src_align.py`）：
+
+| 判定 | 含义 | 处理 |
+|---|---|---|
+| `ok` | 归一化后相等（NFKC+小写+去标点+压空白） | 静默 |
+| `drift` | 相似度 ≥ `SRC_DRIFT_THRESHOLD`(0.85) | warning |
+| `misaligned` | 归一化后**恰好等于本批另一条**的原文 | **error** |
+| `mismatch` | 既不像本条也不是别条 | **error** |
+| `missing` | 没回显 | warning |
+
+- 「Marcel ?」→「Marcel?」这类标点/空白变体判 `ok`，不产生噪音。
+- 重复台词（字幕里很常见）先判自身相等，不会被索引误判为错位。
+- error 会自动复用既有的重试 / 拆批链路（`pipeline/retry.py`）。
+- 需要退回旧行为：`validate_response(..., strict_src=False)`，
+  或改 `pipeline/config.py: STRICT_SRC_DEFAULT`。
+
+### 译文侧字幕约束（CPS / 行长 / 行数）
+
+Stage A 的 rules 引擎只管**英文原文**的行长与切分，中文译文出来后此前没有再校验。
+`pipeline/subtitle_check.py` 补上，默认阈值取 Netflix 简体中文规范：
+
+| 项 | 默认 | 常量 |
+|---|---|---|
+| 阅读速度 | 9 字/秒 | `ZH_MAX_CPS` |
+| 每行字数 | 16 | `ZH_MAX_CHARS_PER_LINE` |
+| 行数 | 2 | `ZH_MAX_LINES` |
+| 单条时长 | 0.833 – 7.0 秒 | `ZH_MIN/MAX_DURATION_SEC` |
+
+**刻意做成度量而非硬门禁**：译文偏快偏长片子照样能出，不该阻断；而本仓库要跑
+六模型质量消融（`docs/quality_ablation_plan.md`），「超速条数占比」「p95 CPS」
+这类数字横向对比才有区分度，做成 pass/fail 反而把信息压没了。
+聚合结果进 `meta.json` 的 `subtitle_quality`，超标时同时在 `validate.warnings` 留一行。
 
 ## 关闭思考
 ```
@@ -98,12 +227,184 @@ Aliyun: reasoning={"effort": "none"}   # 优先于 enable_thinking
 - 连通性烟测：可用 `max_output_tokens=16` + 极短 prompt，单次个位数 token
 - 阿里云：`max_output_tokens >= 16`
 
+# 结构化输出 json_schema 调查结论（2026-08-05 实测）
+
+> 探测脚本：`python3 scripts/probe_json_schema.py [--control]`
+> 先实测、后与官方文档对账（2026-08-05 复核）。文档与实测**完全一致**，
+> 官方文档见 `docs/火山方舟_结构化输出(beta)_1782549049.pdf`、
+> `docs/火山方舟_创建Response_1784703795.pdf`、`docs/阿里云-结构化输出.md`、
+> `docs/阿里云-OpenAI兼容-Responses.md`。
+
+## 参数写法（两套 API 字段名不同）
+
+Responses API — schema 平铺在 `text.format` 内，**没有** `json_schema` 这层嵌套：
+
+```python
+client.responses.create(
+    model=..., input=..., instructions=...,
+    text={"format": {
+        "type": "json_schema",
+        "name": "subtitle_batch",
+        "schema": {...},
+        "strict": True,
+    }},
+)
+```
+
+Chat Completions — schema 包在 `response_format.json_schema` 里，**多一层**：
+
+```python
+client.chat.completions.create(
+    model=..., messages=[...],
+    response_format={"type": "json_schema", "json_schema": {
+        "name": "subtitle_batch",
+        "schema": {...},
+        "strict": True,
+    }},
+)
+```
+
+### `strict` 放在哪一层？（文档里有两种写法，不是矛盾）
+
+- **OpenAI 兼容接口**（本项目走的就是这条）：`strict` 在 `json_schema` **里面**，
+  与 `name`/`schema` 平级。阿里云《结构化输出》OpenAI-compat 示例即此写法，
+  实测也是这个写法被强制执行。
+- **DashScope 原生 SDK**（`dashscope.MultiModalConversation.call`）：`strict` 在
+  `response_format` **外层**，与 `json_schema` 平级（该文档概览表与原生示例用的是这种）。
+
+本项目只用 OpenAI SDK，因此一律取「里面」那种。
+
+## 六模型实测矩阵
+
+「强制」= 负对照判据：schema 里放一个 **prompt 从未提及**的必填字段
+`zzz_schema_probe`，输出里出现它才证明是按 schema 约束解码，而不是模型碰巧
+听了 prompt 的话。这一步是关键——不做负对照会得到完全相反的结论。
+
+| 模型 | 厂商 | Responses `text.format` | Chat `response_format` |
+|---|---|---|---|
+| deepseek-v4-flash | Ark | ✅ 强制 | ⚠️ **间歇 400**（5 次 1 次 `InvalidParameter: response_format.type not valid`） |
+| deepseek-v4-pro | Ark | ✅ 强制 | ✅ 强制 |
+| doubao-seed-2-1-turbo | Ark | ✅ 强制 | ✅ 强制 |
+| qwen3.7-plus | Aliyun | ❌ **静默忽略** | ✅ 强制 |
+| qwen3.7-max | Aliyun | ❌ **静默忽略** | ✅ 强制 |
+| qwen3.8-max | Aliyun | ❌ **静默忽略** | ✅ 强制 |
+
+**最危险的一格是阿里云的「静默忽略」**：请求 200、无任何 warning，schema 就是不生效。
+qwen3.7-plus 在 `strict=True` 且 schema 要求 `{src, tr}` 的情况下，直接回了扁平字符串
+`{"12":"马塞尔？",...}`——契约被破坏而调用方毫无察觉。qwen3.8-max 连测 3 次全部忽略，
+稳定复现，不是抖动。
+
+### 文档对账（每一格都有官方依据）
+
+| 实测结果 | 官方依据 |
+|---|---|
+| Ark 三个模型 Responses `text.format` ✅ | 《结构化输出(beta)》给出的正是 `text.format = {type, name, strict, schema}` 写法，与探针逐字一致；《创建 Response》参数表列有 `text.format.type`（text/json_schema/json_object）、`.name`、`.schema`、`.strict`。支持范围：**250615 及之后版本**的大语言模型 |
+| 阿里云三个模型 Chat `response_format` ✅ | 《结构化输出》明确 JSON Schema 模式支持模型为「Qwen3.7-Plus 系列、Qwen3.7-Max 系列、Qwen3.8-Max 系列」——正好是我们这三个 |
+| 阿里云 Responses **静默忽略** ❌ | **官方明文写了这个行为**。《OpenAI兼容-Responses创建响应》「兼容性说明与限制」原文：「**请求将仅处理本文档明确列出的参数，任何未提及的 OpenAI 参数都会被忽略**」；而该文档的请求体参数表里**没有** `text` / `text.format` / `response_format` / `json_schema`（`text` 只作为**响应**字段出现）。《结构化输出》全文检索 `responses.create` = **0 次**，全部示例走 `chat.completions`。即：阿里云结构化输出**只在 Chat 端存在**，Responses 端未实现，未列出的参数按规定被丢弃——所以 200 而不生效 |
+
+### 文档补充的两条限制（实测未覆盖）
+
+- **Ark 结构化输出仍是 beta**，官方原文「受资源与平台负载影响，服务可用性可能随访问
+  情况产生波动，**请谨慎在生产环境使用**」。这独立支持下面第 4 条「维持现状」。
+- **Ark 不支持的部署形态**：在线推理（TPM 保障包）不支持结构化输出；
+  doubao-seed-1.8 之前版本通过模型单元部署时同样不支持。
+- **阿里云要求开结构化输出时不要设 `max_tokens`**（会截断成非法 JSON）。这与下面第 3 条
+  是同一件事的两面：schema 管语法，不管截断。
+
+## json_object 实测（2026-08-05）：覆盖率比 json_schema 更差，2/6
+
+> 探测脚本：`python3 scripts/probe_json_object.py`
+
+判据是**反向对照**：instructions 明令「一句英文散文，禁止 JSON 与花括号」，
+再加 `text={"format":{"type":"json_object"}}`。输出被迫成 JSON = 端上真强制；
+仍是散文 = 参数被静默忽略。（不做这个反向对照就只能测出「模型听不听话」。）
+
+| 模型 | 厂商 | `json_object` | 对比 `json_schema` |
+|---|---|---|---|
+| deepseek-v4-flash | Ark | ✅ 强制（覆盖了 prompt） | ✅ 强制 |
+| deepseek-v4-pro | Ark | ✅ 强制（覆盖了 prompt） | ✅ 强制 |
+| doubao-seed-2-1-turbo | Ark | ❌ **静默忽略**（3/3 复现） | ✅ 强制 |
+| qwen3.7-plus | Aliyun | ❌ 静默忽略 | ❌ 静默忽略 |
+| qwen3.7-max | Aliyun | ❌ 静默忽略 | ❌ 静默忽略 |
+| qwen3.8-max | Aliyun | ❌ 静默忽略 | ❌ 静默忽略 |
+
+> **doubao 那一格是文档没写的坑**：同一模型 `json_schema` 强制、`json_object` 忽略，
+> 而方舟文档把两者列在同一张「支持模型」表下。再次印证该能力仍是 beta。
+
+不采用 json_object 的理由（比 json_schema 更硬）：
+
+1. 覆盖率更差（2/6 vs 3/6），保证还更弱——只管「是合法 JSON」，不管键集与字段。
+2. 边际收益≈0：它实际只挡代码围栏和前言废话，而 `json_repair.strip_code_fence`
+   已免费处理这两样。
+3. 挡不住截断，`repair.py` 一行省不掉。
+4. **会污染消融实验**：见 `docs/quality_ablation_plan.md`。开一个「2 个模型生效、
+   4 个静默无效」的参数，六模型就不再走同一条路径，测出的格式合规率差异
+   将不再是模型能力差异。做对比实验，一致性优先于局部最优。
+
+## 对本项目的直接结论
+
+1. **不存在「一套写法通吃六模型」**。要上 json_schema，必须按 provider 分叉：
+   Ark 走 Responses `text.format`，阿里云走 Chat `response_format`。
+   而后者会**丢掉 `reasoning={"effort":"none"}` 这个已验证的关思考开关**（chat 端只能退回
+   `enable_thinking:false`，本仓库文档已记其「可能无效」）——用格式保证换回思考风险，
+   得不偿失。
+2. **schema 必须按批动态生成**：输出契约是 `{cue_id: {src, tr}}`，键随批次变化；
+   strict 模式要求 `properties` 全枚举 + `required` 全列 + `additionalProperties:false`，
+   所以 schema 只能由本批 `input_map.keys()` 现生成。30 键规模实测通过（Ark Responses
+   与 Ali Chat 均 30/30 键齐全）。
+3. **json_schema 不能替代 `max_output_tokens` 与截断重试**：30 条批次在
+   `max_output_tokens=1024` 下照样被截断成半截 JSON——schema 约束的是**语法**，
+   不阻止 `length` 截断。`pipeline/repair.py` 仍然必要。
+4. 综合建议：**维持现状**（Responses + prompt 契约 + `json_repair`/`validate` 兜底）。
+   `json_schema`（3/6）与 `json_object`（2/6）都做不到「一套配置六模型行为一致」，
+   而它们能给的保证已被现有四层防御覆盖。六模型走完全相同的代码路径，
+   这对质量消融实验是硬要求。
+   json_schema 只在 Ark 三个模型上是净收益，阿里云侧要么无效、要么得牺牲关思考；
+   且 Ark 侧该能力官方自述仍为 beta、不建议用于生产。
+   若将来只跑 Ark 且 beta 转正，可考虑对 Ark 分支启用 Responses `text.format`。
+
 ## 思考关闭方式（实测有效）
 
 | 厂商 | 正确关闭 | 注意 |
 |---|---|---|
 | Ark | `extra_body={"thinking": {"type": "disabled"}}` | 仅 `enable_thinking:false` 可能无效 |
-| Aliyun | `reasoning={"effort": "none"}` | 优先于 `enable_thinking`；默认 effort 可能很高 |
+| Aliyun | `reasoning={"effort": "none"}` | 优先于 `enable_thinking`；**默认档位就是 `xhigh`** |
+
+**官方文档已确认（《OpenAI兼容-Responses创建响应》参数表）：**
+
+- Ark：「**未传入 `thinking` 时，模型默认开启深度思考**；如需关闭，需显式将子字段 `type`
+  设置为 `disabled`」。取值 `enabled` / `disabled` / `auto`。
+- 阿里云：`reasoning.effort` 共 7 档递增 `none` < `minimal` < `low` < `medium` < `high`
+  < `xhigh` < `max`，**默认值 `xhigh`**——即不传就是次高档思考。
+  「`reasoning.effort` 的优先级高于 `enable_thinking`，建议优先使用 `reasoning.effort`，
+  `enable_thinking` 后续将不再支持。」`enable_thinking` 还是非 OpenAI 标准参数，
+  Python SDK 得靠 `extra_body` 传。
+  → 本项目用 `reasoning={"effort":"none"}` 是文档推荐写法，且是**唯一**长期可用的写法。
+  （`xhigh`/`max` 两档仅华北2（北京）与新加坡可用，与我们无关。）
+
+两家的 `max_output_tokens` 都把**思维链算进输出预算**（Ark 原文：「计入的输出 token
+包含模型回答与思维链内容之和」）。这就是关思考在本项目属于硬性前提、而非优化项的原因。
+
+### 六模型验证结果（2026-08-05，`python3 scripts/smoke_thinking.py --control`）
+
+判据三项全过：`status=completed` + `reasoning_tokens=0` + 无 `reasoning` output item。
+正路径经 `model_client.call`（即线上代码路径），对照组绕过它不传关闭参数。
+
+| 模型 | 关思考（线上路径） | 对照组 reasoning_tokens |
+|---|---|---:|
+| deepseek-v4-flash | ✅ 0 | 172 |
+| deepseek-v4-pro | ✅ 0 | 172 |
+| doubao-seed-2-1-turbo | ✅ 0 | 484 |
+| qwen3.7-plus | ✅ 0 | **537** |
+| qwen3.7-max | ✅ 0 | 173 |
+| qwen3.8-max | ✅ 0 | 104 |
+
+**通过 6/6。** 对照组证明两个关闭参数确实起作用——不传时一道 1 句话的算术题就烧掉
+100–537 个思维链 token；字幕批次（`max_output_tokens=8192`）下这足以吃光输出预算。
+
+> 附带观察：`deepseek-v4-pro` 虽然 `reasoning_tokens=0`，但会把推理过程写进**正文**
+> （无视 "Reply with only the number"）。这是指令遵循问题，不是思考开关问题；
+> 翻译主流程靠 JSON 契约约束输出，暂不受影响。
 
 ## 代码入口
 
