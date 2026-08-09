@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRT = ROOT / "A.French.Village.S01E03.Passer.la.ligne_eng.srt"
+SRT = ROOT / "sample" / "A.French.Village.S01E03_eng.srt"
 GLOSSARY = ROOT / "docs" / "Un_Village_francais_Glossary.md"
 PROMPT = ROOT / "docs" / "translation_prompt.md"
 

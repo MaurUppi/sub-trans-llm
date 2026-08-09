@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SRT = ROOT / "A.French.Village.S01E03.Passer.la.ligne_eng.srt"
+SRT = ROOT / "sample" / "A.French.Village.S01E03_eng.srt"
 PROMPT = ROOT / "docs" / "translation_prompt.md"
 GLOSSARY = ROOT / "docs" / "Un_Village_francais_Glossary.md"
 

@@ -33,6 +33,20 @@ from pipeline.subtitle_check import check_subtitle_quality
 from pipeline.summary import generate_episode_summary
 
 
+def _sampling_evidence(temperature: object, top_p: object) -> dict[str, Any]:
+    def one(value: object) -> dict[str, Any]:
+        omitted = value is model_client.OMIT or value is None
+        return {
+            "sent": not omitted,
+            "value": None if omitted else float(value),
+        }
+
+    return {
+        "temperature": one(temperature),
+        "top_p": one(top_p),
+    }
+
+
 def run_once(
     srt_path: Path | str,
     model: str,
@@ -55,6 +69,7 @@ def run_once(
     use_episode_summary: bool = True,
     summary_max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
     summary_timeout: float = 180.0,
+    episode_summary_override: Optional[str] = None,
 ) -> TranslateResult:
     """
     整集（或切片）翻译：可选通读摘要 + 按 batch_size 分批送模型，本地合并。
@@ -80,7 +95,19 @@ def run_once(
     summary_usage: Optional[Usage] = None
     summary_notes: list[str] = []
 
-    if use_episode_summary:
+    if episode_summary_override is not None:
+        episode_summary = episode_summary_override.strip()
+        if out_path:
+            out_path.mkdir(parents=True, exist_ok=True)
+            (out_path / "episode_summary.txt").write_text(
+                episode_summary + "\n",
+                encoding="utf-8",
+            )
+        log(
+            f"   ♻ 复用冻结摘要 chars={len(episode_summary)} "
+            "（不调用摘要模型）"
+        )
+    elif use_episode_summary:
         summary_dir = out_path  # 落盘到模型输出根目录
         episode_summary, summary_usage, _sum_status, sum_err = generate_episode_summary(
             model,
@@ -371,6 +398,7 @@ def run_once(
         batch_reports=batch_reports,
         episode_summary=episode_summary,
         summary_usage=summary_usage,
+        sampling=_sampling_evidence(temperature, top_p),
         subtitle_quality=subtitle_quality,
     )
     if out_path:

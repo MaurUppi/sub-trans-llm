@@ -294,9 +294,10 @@ def repair_run_dir(
             if (run_dir / "episode_summary.txt").is_file()
             else ""
         ),
+        sampling=dict(meta.get("sampling") or {}),
     )
-    # preserve previous total usage if present
-    if meta.get("usage") and overall_ok:
+    # Preserve cumulative usage on both successful and incomplete repair passes.
+    if meta.get("usage"):
         prev_u = meta["usage"]
         result.usage = Usage(
             input_tokens=int(prev_u.get("input_tokens") or 0)

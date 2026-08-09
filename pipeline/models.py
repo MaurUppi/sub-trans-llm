@@ -53,6 +53,7 @@ class TranslateResult:
     batch_reports: list[dict[str, Any]] = field(default_factory=list)
     episode_summary: str = ""
     summary_usage: Optional[Usage] = None
+    sampling: dict[str, Any] = field(default_factory=dict)
     # 译文侧字幕约束度量（CPS/行长/行数）。只做度量不阻断，见 pipeline/subtitle_check.py
     subtitle_quality: Optional[dict[str, Any]] = None
 
@@ -78,6 +79,7 @@ class TranslateResult:
             "batch_jobs": self.batch_jobs,
             "batch_reports": self.batch_reports,
             "episode_summary_chars": len(self.episode_summary or ""),
+            "sampling": self.sampling,
             "usage": {
                 "input_tokens": self.usage.input_tokens,
                 "output_tokens": self.usage.output_tokens,

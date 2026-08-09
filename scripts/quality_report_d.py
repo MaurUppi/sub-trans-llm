@@ -3,7 +3,7 @@
 Config D quality run + structured report (see docs/quality_ablation_plan.md § Report).
 
 Defaults for this campaign:
-  SRT=A.French.Village.S04E01.Le.Train_eng.srt
+  SRT=sample/A.French.Village.S01E03_eng.srt
   model=qwen3.7-max
   glossary=on, summary=on, no preprocess
   batch-jobs=1
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SRT = ROOT / "A.French.Village.S04E01.Le.Train_eng.srt"
+DEFAULT_SRT = ROOT / "sample" / "A.French.Village.S01E03_eng.srt"
 GLOSSARY = ROOT / "docs" / "Un_Village_francais_Glossary.md"
 PROMPT = ROOT / "docs" / "translation_prompt.md"
 
@@ -182,7 +182,7 @@ def build_report(run_dir: Path, model: str, srt_path: Path, cfg: dict) -> dict:
             "top_p": cfg.get("top_p"),
             "sampling_note": cfg.get(
                 "sampling_note",
-                "None → .env DEFAULT_* (fallback 1.0); 'omit' → not sent to API",
+                "None / OMIT -> omitted from the API request; explicit number -> sent",
             ),
         },
         "stage_A": {

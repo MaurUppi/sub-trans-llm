@@ -23,7 +23,7 @@ import model_client
 import translate
 
 _ROOT = Path(__file__).resolve().parent
-DEFAULT_SRT = _ROOT / "A.French.Village.S01E03.Passer.la.ligne_eng.srt"
+DEFAULT_SRT = _ROOT / "sample" / "A.French.Village.S01E03_eng.srt"
 
 
 def _parse_models(spec: str) -> list[str]:

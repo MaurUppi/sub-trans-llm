@@ -310,8 +310,9 @@ def call(
     instructions :
         可选系统指令（Responses 的 instructions 字段）。
     temperature / top_p :
-        采样参数。``None`` 时读 ``DEFAULT_TEMPERATURE`` / ``DEFAULT_TOP_P``
-        （缺省 1.0）；传 ``OMIT`` 或 env 设为 ``omit`` 则不写入请求。
+        采样参数。只有显式传入数值才写入请求；``None`` 或 ``OMIT``
+        均省略字段并使用服务端默认值。旧的 ``DEFAULT_TEMPERATURE`` /
+        ``DEFAULT_TOP_P`` 环境变量不再参与解析。
     max_output_tokens :
         输出上限（含 reasoning tokens）。
         ``None`` 时先读 ``DEFAULT_MAX_OUTPUT_TOKENS``，仍为空则不传（服务端默认）。

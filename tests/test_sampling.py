@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 
 import model_client
-from main import _sampling_from_args, warn_if_both_sampling
+from main import DEFAULT_SRT, _sampling_from_args, warn_if_both_sampling
+from pipeline import orchestrator
+from pipeline.models import BatchOutcome, ValidateReport
 
 
 def test_default_is_omit_and_ignores_env(monkeypatch):
@@ -12,6 +15,12 @@ def test_default_is_omit_and_ignores_env(monkeypatch):
     monkeypatch.setenv("DEFAULT_TOP_P", "0.7")
     assert model_client._resolve_sampling_param(None, "DEFAULT_TEMPERATURE") is None
     assert model_client._resolve_sampling_param(None, "DEFAULT_TOP_P") is None
+
+
+def test_cli_default_srt_is_current_e03_sample() -> None:
+    assert DEFAULT_SRT.name == "A.French.Village.S01E03_eng.srt"
+    assert DEFAULT_SRT.parent.name == "sample"
+    assert DEFAULT_SRT.is_file()
 
 
 def test_explicit_value_is_sent(monkeypatch):
@@ -74,3 +83,88 @@ def test_warn_counts_zero_as_given(capsys):
     """0 是合法值，不能当成'没给'。"""
     warn_if_both_sampling(argparse.Namespace(temperature=0.0, top_p=0.9))
     assert capsys.readouterr().err != ""
+
+
+def test_pipeline_sampling_evidence_builder_is_available():
+    assert callable(getattr(orchestrator, "_sampling_evidence", None))
+
+
+def test_pipeline_sampling_evidence_preserves_sent_and_omitted_intent():
+    assert orchestrator._sampling_evidence(model_client.OMIT, 0.8) == {
+        "temperature": {"sent": False, "value": None},
+        "top_p": {"sent": True, "value": 0.8},
+    }
+    assert orchestrator._sampling_evidence(0.0, model_client.OMIT) == {
+        "temperature": {"sent": True, "value": 0.0},
+        "top_p": {"sent": False, "value": None},
+    }
+
+
+def test_run_once_accepts_a_frozen_episode_summary():
+    assert "episode_summary_override" in inspect.signature(
+        orchestrator.run_once
+    ).parameters
+
+
+def test_frozen_episode_summary_is_reused_without_model_call(
+    sample_srt, tmp_path, monkeypatch
+):
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text(
+        "Translate ${sourceLanguage} to ${targetLanguage}.",
+        encoding="utf-8",
+    )
+    summary_calls = 0
+
+    def fake_generate_summary(*args, **kwargs):
+        nonlocal summary_calls
+        summary_calls += 1
+        return "generated summary", model_client.Usage(), "completed", None
+
+    def fake_batch(**kwargs):
+        cues = kwargs["batch_cues"]
+        parsed = {
+            cue.id: {"src": cue.text, "tr": f"译{cue.id}"}
+            for cue in cues
+        }
+        return BatchOutcome(
+            batch_index=kwargs["batch_index"],
+            cues=cues,
+            input_map={cue.id: cue.text for cue in cues},
+            raw_text="{}",
+            status="completed",
+            incomplete_reason=None,
+            usage=model_client.Usage(),
+            model_id="test-model",
+            alias="test-alias",
+            validate=ValidateReport(
+                ok=True,
+                parsed=parsed,
+                stats={"n_in": len(cues), "n_tr_ok": len(cues)},
+            ),
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_episode_summary",
+        fake_generate_summary,
+    )
+    monkeypatch.setattr(orchestrator, "call_one_batch", fake_batch)
+
+    result = orchestrator.run_once(
+        srt_path=sample_srt,
+        model="test-alias",
+        prompt_path=prompt,
+        out_dir=tmp_path / "out",
+        batch_size=50,
+        batch_jobs=1,
+        episode_summary_override="frozen context",
+    )
+
+    assert summary_calls == 0
+    assert result.episode_summary == "frozen context"
+    assert "frozen context" in result.instructions
+    assert result.summary_usage is None
+    assert (tmp_path / "out" / "episode_summary.txt").read_text(
+        encoding="utf-8"
+    ).strip() == "frozen context"

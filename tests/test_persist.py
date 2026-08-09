@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import fields
+
 from model_client import Usage
 from pipeline.models import TranslateResult, ValidateReport
 from pipeline.persist import write_outputs
+
+
+def test_translate_result_has_sampling_evidence_field() -> None:
+    assert "sampling" in {field.name for field in fields(TranslateResult)}
 
 
 def test_write_outputs_success_and_partial(tmp_path):
