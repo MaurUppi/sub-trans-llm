@@ -47,8 +47,8 @@ out/                       # 运行产物；已 gitignore
 | `pipeline.orchestrator` | `run_once`：摘要→分批→失败重跑→合并 |
 | `pipeline.repair` | 已有 run 的离线恢复、失败批重跑和 sub-batch 补采 |
 | `pipeline.preprocess` | Stage A 英文字幕清理、重切和交付适配 |
-| `pipeline.sampling_matrix` | 冻结 40-case 参数矩阵、摘要复用、进度与恢复 |
-| `pipeline.inspection_rescue` | 获明确授权后，对已记录 Provider refusal 执行专用占位补采 |
+| `pipeline.sampling_matrix` | 冻结 40-case 的外层编排器；复用既有摘要、`run_once`、repair 与落盘能力 |
+| `pipeline.inspection_rescue` | 获明确授权后，对已记录 Provider refusal 执行单术语专用占位补采 |
 
 ## 样例与评估材料
 
@@ -186,6 +186,19 @@ python main.py repair \
 - 每集摘要只生成一次并冻结复用；Glossary 固定为 `docs/Un_Village_francais_Glossary.md`。
 - 输出文件名包含模型、episode、temperature 与 topP，OMIT 与显式值可直接识别。
 
+### 与既有 pipeline 的调用关系
+
+`pipeline.sampling_matrix` 只负责矩阵、状态和阶段编排，不另建一套翻译流水线。各子命令与既有模块的关系如下：
+
+| 子命令 | 调用关系 | 串并行行为 |
+|---|---|---|
+| `summaries` | 逐集调用 `pipeline.summary.generate_episode_summary`，生成或复用冻结摘要 | S01E03、S01E06 依次串行 |
+| `run` | `execute_case` 调用既有 `pipeline.orchestrator.run_once`；后者继续使用 prompt、Glossary、SRT 分批、`batch_client`、retry、validate、字幕度量与 persist | 两个目标模型/Provider 流可并行；同一模型内 case 串行；每个 case 固定 `batch_jobs=1`，批次串行 |
+| `repair` | 对 `status=failed` 的 case 逐个调用既有 `pipeline.repair.repair_run_dir` | case 串行；不会由 `run` 自动触发 |
+| `inspection-rescue` | 对符合条件的失败/refusal case 逐个调用 `pipeline.inspection_rescue`；内部复用 `batch_client.call_one_batch`、`srt_io` 和 persist | case 串行；不会由 `run` 或 `repair` 自动触发 |
+
+因此，可以先用 `summaries` 独立生成冻结摘要，也可以直接执行 `run`（它会先生成或复用摘要）；`run` 结束后，再按需要分别显式执行 `repair` 和经授权的 `inspection-rescue`。`out/.../TQA-evaluation/` 属于采集完成后的结果评审工具，不被 `sampling_matrix` 导入或调用，也不参与参数采集。
+
 ```bash
 MATRIX_OUT=out/opus46-low-parity-full-matrix-20260809
 
@@ -213,7 +226,7 @@ python -m pipeline.sampling_matrix repair --out "$MATRIX_OUT"
 普通 repair 仍无法补齐时，case 可以保留为 `provider_refusal`。`inspection-rescue` 是本轮冻结实验的专用、可审计补采手段，不是通用翻译功能：
 
 - 只有用户明确授权且符合 Provider 条款时才可运行。
-- 仅处理已记录缺键、且命中冻结 Glossary 术语的 cue；其它内容直接拒绝。
+- 当前实现仅处理已记录缺键、且原文包含冻结源词 `Communists` 的 cue，并在返回后恢复为 `共产党`；其它内容直接拒绝。
 - 请求使用不透明术语占位符，返回后按冻结 Glossary 恢复；原主 attempt 不改写。
 - case 的主状态仍是 `provider_refusal`，不能算作原始 50-cue 成功。
 - rescue SRT 仍写入普通 `bilingual/` 目录，但文件名永久带 `__inspection-rescue.srt`。
