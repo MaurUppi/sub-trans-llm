@@ -96,6 +96,211 @@ def test_selfcheck_exposes_only_relevant_inputs_and_forwards_them(
         )
 
 
+def test_preprocess_help_exposes_only_stage_a_options(capsys) -> None:
+    parser = main.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["preprocess", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    for option in (
+        "--srt",
+        "--out",
+        "--fix-overlaps",
+        "--remove-sdh",
+        "--remove-disfluency",
+        "--optimize",
+        "--resplit",
+        "--words",
+        "--model",
+        "--APImode",
+    ):
+        assert option in help_text
+    for unused in (
+        "--source-language",
+        "--target-language",
+        "--prompt",
+        "--glossary",
+        "--max-cues",
+        "--cue-offset",
+        "--max-output-tokens",
+        "--timeout",
+        "--jobs",
+        "--max-retries",
+        "--retry-backoff",
+        "--batch-size",
+        "--batch-jobs",
+        "--no-summary",
+        "--temperature",
+        "--top-p",
+    ):
+        assert unused not in help_text
+
+
+@pytest.mark.parametrize("command", ["preprocess", "run"])
+@pytest.mark.parametrize(
+    "conflicting",
+    [
+        ["--fix-overlaps", "--no-fix-overlaps"],
+        ["--resplit", "--no-resplit"],
+    ],
+)
+def test_stage_a_force_switches_are_mutually_exclusive(
+    command: str,
+    conflicting: list[str],
+) -> None:
+    argv = [command, "--srt", "input.srt"]
+    if command == "run":
+        argv.extend(["--model", "qwen3.7-plus", "--preprocess"])
+
+    with pytest.raises(SystemExit):
+        main.build_parser().parse_args([*argv, *conflicting])
+
+
+def test_run_rejects_stage_a_options_without_preprocess(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    dispatched = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return 0
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: tmp_path / "out")
+    args = main.build_parser().parse_args(
+        [
+            "run",
+            "--srt",
+            "input.srt",
+            "--model",
+            "qwen3.7-plus",
+            "--remove-sdh",
+        ]
+    )
+
+    assert main.cmd_run(args) == 2
+    assert dispatched is False
+    assert "require --preprocess" in capsys.readouterr().err
+
+
+def test_standalone_and_run_build_the_same_stage_a_config(tmp_path: Path) -> None:
+    parser = main.build_parser()
+    words = tmp_path / "words.json"
+    words.write_text("[]", encoding="utf-8")
+    common_flags = [
+        "--srt",
+        "input.srt",
+        "--APImode",
+        "Responses",
+        "--fix-overlaps",
+        "--remove-sdh",
+        "--remove-disfluency",
+        "--optimize",
+        "--resplit",
+        "--words",
+        str(words),
+        "--model",
+        "qwen3.7-plus",
+    ]
+    standalone = parser.parse_args(["preprocess", *common_flags])
+    linked = parser.parse_args(["run", *common_flags, "--preprocess"])
+
+    standalone_config = main._preprocess_config_from_args(
+        standalone,
+        work_dir=tmp_path,
+    )
+    linked_config = main._preprocess_config_from_args(
+        linked,
+        work_dir=tmp_path,
+    )
+
+    assert standalone_config == linked_config
+
+
+def test_standalone_preprocess_rejects_a_missing_words_file(
+    tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "input.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    args = main.build_parser().parse_args(
+        [
+            "preprocess",
+            "--srt",
+            str(source),
+            "--words",
+            str(tmp_path / "missing.json"),
+            "--out",
+            str(output),
+        ]
+    )
+
+    assert main.cmd_preprocess(args) == 2
+    assert not output.exists()
+    assert "words file not found" in capsys.readouterr().err
+
+
+def test_run_preprocess_rejects_a_missing_words_file_before_dispatch(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    dispatched = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return 0
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: tmp_path / "out")
+    args = main.build_parser().parse_args(
+        [
+            "run",
+            "--srt",
+            "input.srt",
+            "--model",
+            "qwen3.7-plus",
+            "--preprocess",
+            "--words",
+            str(tmp_path / "missing.json"),
+        ]
+    )
+
+    assert main.cmd_run(args) == 2
+    assert dispatched is False
+    assert "words file not found" in capsys.readouterr().err
+
+
+def test_standalone_optimize_requires_model_before_writing(
+    tmp_path: Path, capsys
+) -> None:
+    source = tmp_path / "input.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    args = main.build_parser().parse_args(
+        [
+            "preprocess",
+            "--srt",
+            str(source),
+            "--optimize",
+            "--out",
+            str(output),
+        ]
+    )
+
+    assert main.cmd_preprocess(args) == 2
+    assert not output.exists()
+    assert "--optimize requires --model" in capsys.readouterr().err
+
+
 def test_repair_resolves_model_child_and_reuses_recorded_api_mode(
     tmp_path: Path, monkeypatch
 ) -> None:

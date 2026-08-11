@@ -163,6 +163,8 @@ Villeneuve,维勒纳夫,地名
 
 ## 前处理与修复
 
+Stage A 是翻译前的可审计字幕变换：独立 `preprocess` 用于先生成、检查并复用清洗结果，`run --preprocess` 则使用同一套配置和流水线，在 Stage A 成功后继续翻译。两者不是两份实现。
+
 ```bash
 # 只执行 Stage A
 python main.py preprocess \
@@ -186,6 +188,12 @@ python main.py repair \
   --batches 2,3 \
   --sub-batch-size 10
 ```
+
+独立 `preprocess` 只接受 Stage A 相关参数：`--srt`、`--out`、`--fix-overlaps/--no-fix-overlaps`、`--remove-sdh`、`--remove-disfluency`、`--optimize`、`--resplit/--no-resplit`、`--words`、`--model` 和 `--APImode/--api-mode`。prompt、Glossary、语言、批处理、token、超时、重试、采样和摘要参数属于翻译阶段，不在该命令中出现。
+
+时间轴去重叠和重切默认使用 `auto`；正反开关互斥。`--optimize` 必须同时提供 `--model`，其 API 模式由 `--APImode` 选择；显式优化失败会终止 Stage A，不会静默跳过。`--words` 必须指向存在的词级时间戳 JSON。独立运行会写出 `input.srt`、`*.clean.srt`、`preprocess_meta.json` 和 `report.json`，供翻译前审查。
+
+Stage A 是启发式改善流程，不承诺消除全部行长、阅读速度或时间轴警告；结果应以 `report.json` 为准。`run` 中任何 Stage A 开关都必须与 `--preprocess` 同时使用，否则命令拒绝执行。LLM 步骤复用 `run --model`，不引入第二个模型参数。
 
 repair 会从 `meta.json` 自动沿用原运行的 API 模式及 `temperature` / `top_p` 发送记录；如需显式确认或覆盖采样值，可传入相应参数。`--APImode` 只能省略或传入与原运行相同的模式。批目录、合并后的 `parsed.json`、更新后的 `meta.json` 与最终 SRT 共同构成运行证据。
 

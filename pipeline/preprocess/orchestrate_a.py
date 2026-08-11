@@ -86,22 +86,18 @@ def run_preprocess(
         meta["backends"]["remove_disfluency"] = "pipeline.rules.DisfluencyRemover"
         log(f"🔧 remove-disfluency: {before} → {document.total_blocks}")
 
-    # A4 optimize (VC) — optional, may be no-op if not available
+    # A4 optimize (VC) — explicit request; failures abort instead of silently skipping
     meta["steps"]["optimize"] = config.optimize
     if config.optimize:
-        try:
-            from pipeline.preprocess.vc_optimize_adapter import optimize_document
+        from pipeline.preprocess.vc_optimize_adapter import optimize_document
 
-            document, opt_meta = optimize_document(
-                document,
-                model=config.model,
-                api_mode=config.api_mode,
-            )
-            meta["backends"]["optimize"] = "pipeline.preprocess.vc_optimize_adapter"
-            meta["notes"].extend(opt_meta.get("notes") or [])
-        except Exception as e:  # noqa: BLE001
-            meta["notes"].append(f"optimize skipped: {type(e).__name__}: {e}")
-            log(f"⚠ optimize skipped: {e}")
+        document, opt_meta = optimize_document(
+            document,
+            model=config.model,
+            api_mode=config.api_mode,
+        )
+        meta["backends"]["optimize"] = "pipeline.preprocess.vc_optimize_adapter"
+        meta["notes"].extend(opt_meta.get("notes") or [])
 
     # A5 resplit
     need_split = needs_resplit_rules(

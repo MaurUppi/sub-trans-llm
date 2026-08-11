@@ -191,13 +191,13 @@ def cmd_repair(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
-def _maybe_preprocess(args: argparse.Namespace) -> Path:
-    """If --preprocess, run Stage A and return clean SRT path; else original."""
-    srt = Path(args.srt)
-    if not getattr(args, "preprocess", False):
-        return srt
+def _preprocess_config_from_args(
+    args: argparse.Namespace,
+    *,
+    work_dir: Path | None,
+):
+    """Build the one Stage A config shared by both CLI entry points."""
     from pipeline.preprocess.config import PreprocessConfig
-    from pipeline.preprocess.orchestrate_a import run_preprocess
 
     fix = "auto"
     if getattr(args, "fix_overlaps", False):
@@ -209,21 +209,34 @@ def _maybe_preprocess(args: argparse.Namespace) -> Path:
         resplit = "on"
     if getattr(args, "no_resplit", False):
         resplit = "off"
-    work = Path(args.out) / "_preprocess" if args.out else None
-    cfg = PreprocessConfig(
+    model = getattr(args, "model", None)
+    if getattr(args, "optimize", False) and not model:
+        raise ValueError("--optimize requires --model")
+    words_path = Path(args.words) if getattr(args, "words", None) else None
+    if words_path is not None and not words_path.is_file():
+        raise ValueError(f"words file not found: {words_path}")
+    return PreprocessConfig(
         fix_overlaps=fix,  # type: ignore[arg-type]
         remove_sdh=bool(getattr(args, "remove_sdh", False)),
         remove_disfluency=bool(getattr(args, "remove_disfluency", False)),
         optimize=bool(getattr(args, "optimize", False)),
         resplit=resplit,  # type: ignore[arg-type]
-        words_path=Path(args.words) if getattr(args, "words", None) else None,
-        model=getattr(args, "model", None) or getattr(args, "models", None),
+        words_path=words_path,
+        model=model,
         api_mode=args.api_mode,
-        work_dir=work,
+        work_dir=work_dir,
     )
-    # single-model string if models is list-like string
-    if isinstance(cfg.model, str) and "," in cfg.model:
-        cfg.model = cfg.model.split(",")[0].strip()
+
+
+def _maybe_preprocess(args: argparse.Namespace) -> Path:
+    """If --preprocess, run Stage A and return clean SRT path; else original."""
+    srt = Path(args.srt)
+    if not getattr(args, "preprocess", False):
+        return srt
+    from pipeline.preprocess.orchestrate_a import run_preprocess
+
+    work = Path(args.out) / "_preprocess" if args.out else None
+    cfg = _preprocess_config_from_args(args, work_dir=work)
     pr = run_preprocess(srt, cfg)
     assert pr.clean_srt_path is not None
     print(f"preprocess: clean → {pr.clean_srt_path}")
@@ -370,31 +383,14 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 
 def cmd_preprocess(args: argparse.Namespace) -> int:
     """Stage A only."""
-    from pipeline.preprocess.config import PreprocessConfig
     from pipeline.preprocess.orchestrate_a import run_preprocess
 
-    fix = "auto"
-    if getattr(args, "fix_overlaps", False):
-        fix = "on"
-    if getattr(args, "no_fix_overlaps", False):
-        fix = "off"
-    resplit = "auto"
-    if getattr(args, "resplit", False):
-        resplit = "on"
-    if getattr(args, "no_resplit", False):
-        resplit = "off"
     work = Path(args.out) if args.out else None
-    cfg = PreprocessConfig(
-        fix_overlaps=fix,  # type: ignore[arg-type]
-        remove_sdh=bool(args.remove_sdh),
-        remove_disfluency=bool(args.remove_disfluency),
-        optimize=bool(args.optimize),
-        resplit=resplit,  # type: ignore[arg-type]
-        words_path=Path(args.words) if args.words else None,
-        model=args.model,
-        api_mode=args.api_mode,
-        work_dir=work,
-    )
+    try:
+        cfg = _preprocess_config_from_args(args, work_dir=work)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     pr = run_preprocess(args.srt, cfg)
     print(
         f"OK preprocess {pr.meta['counts'].get('in')}→{pr.meta['counts'].get('out')} "
@@ -406,6 +402,21 @@ def cmd_preprocess(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     if not args.model:
         print("run requires --model", file=sys.stderr)
+        return 2
+    stage_a_options = (
+        "fix_overlaps",
+        "no_fix_overlaps",
+        "remove_sdh",
+        "remove_disfluency",
+        "optimize",
+        "resplit",
+        "no_resplit",
+        "words",
+    )
+    if not args.preprocess and any(
+        bool(getattr(args, field, False)) for field in stage_a_options
+    ):
+        print("Stage A options require --preprocess", file=sys.stderr)
         return 2
     models = [args.model]
     out_dir = Path(args.out) if args.out else _default_out(f"run_{args.model}")
@@ -419,7 +430,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(args, "batch_size", None) is None:
         args.batch_size = 50
     args._original_srt = Path(args.srt)
-    args._resolved_srt = _maybe_preprocess(args)
+    try:
+        args._resolved_srt = _maybe_preprocess(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     args.srt = str(args._resolved_srt)
     print(
         f"run: model={args.model} batch_size={args.batch_size} "
@@ -784,12 +799,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_smoke)
 
     def add_preprocess_flags(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument(
+        overlap = sp.add_mutually_exclusive_group()
+        overlap.add_argument(
             "--fix-overlaps",
             action="store_true",
             help="强制启用时间轴去重叠（默认 auto：检测到重叠才修）",
         )
-        sp.add_argument(
+        overlap.add_argument(
             "--no-fix-overlaps",
             action="store_true",
             help="禁用时间轴去重叠",
@@ -801,16 +817,23 @@ def build_parser() -> argparse.ArgumentParser:
             help="移除口癖/重复（改原文）",
         )
         sp.add_argument("--optimize", action="store_true", help="LLM 源文优化（条数不变）")
-        sp.add_argument("--resplit", action="store_true", help="强制重切过长字幕")
-        sp.add_argument("--no-resplit", action="store_true", help="禁止重切")
+        resplit = sp.add_mutually_exclusive_group()
+        resplit.add_argument("--resplit", action="store_true", help="强制重切过长字幕")
+        resplit.add_argument("--no-resplit", action="store_true", help="禁止重切")
         sp.add_argument(
             "--words",
             default=None,
             help="词级时间戳 JSON（启用 VideoCaptioner Split 时）",
         )
 
-    sp = sub.add_parser("preprocess", help="Stage A：字幕前处理（不翻译）")
-    add_common(sp)
+    sp = sub.add_parser(
+        "preprocess",
+        help="Stage A：字幕前处理（不翻译）",
+        allow_abbrev=False,
+    )
+    add_api_mode(sp)
+    sp.add_argument("--srt", required=True, help="源语言字幕 SRT 路径")
+    sp.add_argument("--out", default=None, help="Stage A 证据输出目录")
     add_preprocess_flags(sp)
     sp.add_argument(
         "--model",
