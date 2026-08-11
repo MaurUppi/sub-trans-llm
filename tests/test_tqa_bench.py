@@ -426,6 +426,14 @@ def test_default_profile_freezes_the_ten_explicit_sampling_arms() -> None:
     assert "samples 只指定整份候选译文中哪些 cue 进入 evaluator" in text
     assert "evaluator 是“评分模型/裁判”，不负责生成候选字幕" in text
     assert "与 evaluator.temperature 完全独立" in text
+    assert '实际路径建议使用双引号，例如 "./path/to/file.md"' in text
+    assert 'null 表示不提供自定义文件，不能写成 "null"' in text
+    assert "普通用户建议保持 no_reference" in text
+    assert "anchor：参考译文作为可信标准答案" in text
+    assert "hint：参考译文仅辅助理解" in text
+    assert text.index("tqa:") > text.index("execution:")
+    tqa_section = text[text.index("tqa:") :]
+    assert "【必须修改】" not in tqa_section
 
 
 def test_collect_model_jobs_parallelizes_models_but_keeps_case_artifacts_isolated(

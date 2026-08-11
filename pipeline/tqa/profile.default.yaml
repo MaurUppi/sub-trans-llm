@@ -7,6 +7,10 @@
 #   【必须修改】必须按本次作品或实验填写，不能直接照抄示例。
 #   【按需修改】默认值可以运行，但应根据实验目的确认。
 #   【通常保留】属于框架/判定默认值，没有明确理由时不建议修改。
+#
+# 路径写法：
+#   null 表示不提供自定义文件，不能写成 "null"。
+#   实际路径建议使用双引号，例如 "./path/to/file.md"。
 
 profile_version: "1.0" # 【通常保留】Profile 格式版本。
 framework:
@@ -44,71 +48,15 @@ translation:
     - "deepseek-v4-flash"
     - "qwen3.7-plus"
   api_mode: "ChatCompletion" # 【按需修改】候选翻译使用的 API 模式。
-  prompt: null # 【按需修改】null 使用内置默认 prompt，也可填写自定义路径。
-  glossary: null # 【按需修改】可填写 CSV/Markdown Glossary 路径。
+  # 【按需修改】null 使用内置默认 prompt；自定义示例："./path/to/prompt.md"。
+  prompt: null
+  # 【按需修改】null 表示不加载术语表；自定义示例："./path/to/glossary.csv"。
+  glossary: null
   summary:
     # 【按需修改】首个参数臂生成摘要；同一“模型 × 集”的后续参数臂复用。
     mode: "generate_once" # 可选 generate_once 或 none。
     max_output_tokens: 4096
     timeout: 180
-
-tqa:
-  # 【必须确认】无参考译文使用 no_reference；有可靠参考时使用 single_reference。
-  reference_mode: "no_reference"
-  # single_reference 模式还必须增加：reference_role: "anchor" 或 "hint"
-
-  # 【必须修改】只保留本作品实际使用的维度，并写明作品级评分关注点。
-  dimension_instances:
-    领域术语: {description: "本作品的专业术语、专有名词和统一译名。"}
-    话语体系: {description: "本作品的政治、宗教或亚文化话语体系。"}
-    长句/复杂句: {description: "复杂句法、逻辑关系和高密度信息保留。"}
-    习语/口语: {description: "习语、俚语及自然口语表达。"}
-    上下文依赖: {description: "需要结合剧情或相邻字幕才能确定的含义。"}
-    正式语体: {description: "正式、官方、法律或仪式性语体。"}
-    非母语口语: {description: "在可理解前提下保留非母语表达特征。"}
-    情感张力: {description: "情绪强度、戏剧张力与节奏。"}
-    讽刺: {description: "讽刺、言外之意、双关与黑色幽默。"}
-
-  # 【必须修改】按作品调整；所有权重之和必须为 1.0。
-  dimension_weights:
-    领域术语: 0.12
-    话语体系: 0.08
-    长句/复杂句: 0.15
-    习语/口语: 0.12
-    上下文依赖: 0.20
-    正式语体: 0.06
-    非母语口语: 0.02
-    情感张力: 0.13
-    讽刺: 0.12
-
-  # 【通常保留】仅影响报告中的样例排序/展示，不参与集分和模型分。
-  sample_aggregation: "weighted_avg"
-  severity_thresholds:
-    critical_upper: 3
-    major_upper: 5
-    minor_upper: 7
-  hard_failures:
-    enabled:
-      - SEMANTIC_INVERSION
-      - IDENTITY_CONFUSION
-      - CRITICAL_OMISSION
-      - FABRICATION
-    max_hard_failures_per_episode: 3
-  thresholds:
-    dimension_floor: 4.0
-    episode_pass: 6.5
-    model_pass: 6.5
-    hard_failure_veto: true
-  conditional_pass:
-    # 【通常保留】所有 max_* 都是包含上界，即实际值 <= 此值时仍在容忍范围。
-    max_failed_dimensions: 2
-    max_hard_failures_per_episode: 3
-  refusal_handling:
-    # 【通常保留】Provider refusal 固定记 0，并保留硬失败标记。
-    mode: "count_and_mark"
-    default_score: 0
-    mark_as_hard_failure: true
-    hard_failure_type: "CRITICAL_OMISSION"
 
 evaluator:
   # evaluator 是“评分模型/裁判”，不负责生成候选字幕。
@@ -160,3 +108,69 @@ execution:
   timeout: 300
   max_retries: 2
   retry_backoff: 3
+
+# =============================================================================
+# 三、TQA 评分规则（普通用户建议保持默认）
+# =============================================================================
+
+tqa:
+  # 【通常保留】普通用户建议保持 no_reference。
+  # 仅当拥有可靠、经过人工审核的参考字幕，并理解参考角色语义时，
+  # 才改为 single_reference，同时为每集提供 reference_srt。
+  reference_mode: "no_reference"
+  # single_reference 的高级配置（二选一，取消对应行的注释）：
+  # reference_role: "anchor" # anchor：参考译文作为可信标准答案，候选会与其严格比较。
+  # reference_role: "hint"   # hint：参考译文仅辅助理解，合理的不同译法不应被惩罚。
+
+  # 【通常保留】默认维度适用于通用字幕评测；仅熟悉 TQA 且确有作品级需求时修改。
+  dimension_instances:
+    领域术语: {description: "本作品的专业术语、专有名词和统一译名。"}
+    话语体系: {description: "本作品的政治、宗教或亚文化话语体系。"}
+    长句/复杂句: {description: "复杂句法、逻辑关系和高密度信息保留。"}
+    习语/口语: {description: "习语、俚语及自然口语表达。"}
+    上下文依赖: {description: "需要结合剧情或相邻字幕才能确定的含义。"}
+    正式语体: {description: "正式、官方、法律或仪式性语体。"}
+    非母语口语: {description: "在可理解前提下保留非母语表达特征。"}
+    情感张力: {description: "情绪强度、戏剧张力与节奏。"}
+    讽刺: {description: "讽刺、言外之意、双关与黑色幽默。"}
+
+  # 【通常保留】默认权重适用于通用字幕评测；所有权重之和必须为 1.0。
+  dimension_weights:
+    领域术语: 0.12
+    话语体系: 0.08
+    长句/复杂句: 0.15
+    习语/口语: 0.12
+    上下文依赖: 0.20
+    正式语体: 0.06
+    非母语口语: 0.02
+    情感张力: 0.13
+    讽刺: 0.12
+
+  # 【通常保留】仅影响报告中的样例排序/展示，不参与集分和模型分。
+  sample_aggregation: "weighted_avg"
+  severity_thresholds:
+    critical_upper: 3
+    major_upper: 5
+    minor_upper: 7
+  hard_failures:
+    enabled:
+      - SEMANTIC_INVERSION
+      - IDENTITY_CONFUSION
+      - CRITICAL_OMISSION
+      - FABRICATION
+    max_hard_failures_per_episode: 3
+  thresholds:
+    dimension_floor: 4.0
+    episode_pass: 6.5
+    model_pass: 6.5
+    hard_failure_veto: true
+  conditional_pass:
+    # 【通常保留】所有 max_* 都是包含上界，即实际值 <= 此值时仍在容忍范围。
+    max_failed_dimensions: 2
+    max_hard_failures_per_episode: 3
+  refusal_handling:
+    # 【通常保留】Provider refusal 固定记 0，并保留硬失败标记。
+    mode: "count_and_mark"
+    default_score: 0
+    mark_as_hard_failure: true
+    hard_failure_type: "CRITICAL_OMISSION"
