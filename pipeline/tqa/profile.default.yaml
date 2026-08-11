@@ -1,0 +1,115 @@
+# Copy this file, replace paths/samples/models, then run:
+#   python3 main.py bench --all --profile path/to/profile.yaml
+profile_version: "1.0"
+framework:
+  version: "v2"
+project:
+  name: "My subtitle translation evaluation"
+  source_language: "English"
+  target_language: "Simplified Chinese"
+inputs:
+  episodes:
+    - id: "E01"
+      source_srt: "./path/to/source.srt"
+      # reference_srt: "./path/to/reference.zh.srt"
+      samples:
+        - cue_id: 1
+          dimensions: ["上下文依赖"]
+          note: "Replace with a directed TQA sample and its test intent."
+translation:
+  models:
+    - "deepseek-v4-flash"
+    - "qwen3.7-plus"
+  api_mode: "ChatCompletion"
+  prompt: null
+  glossary: null
+  summary:
+    # The first arm generates it; later arms for the same model/episode reuse it.
+    mode: "generate_once"
+    max_output_tokens: 4096
+    timeout: 180
+sampling:
+  # Explicit arms only; this list is not expanded as a Cartesian product.
+  arms:
+    - {temperature: OMIT, top_p: OMIT}
+    - {temperature: 0.1, top_p: OMIT}
+    - {temperature: 0.3, top_p: OMIT}
+    - {temperature: 0.7, top_p: OMIT}
+    - {temperature: 1.0, top_p: OMIT}
+    - {temperature: 1.3, top_p: OMIT}
+    - {temperature: 1.5, top_p: OMIT}
+    - {temperature: OMIT, top_p: 0.7}
+    - {temperature: OMIT, top_p: 0.8}
+    - {temperature: OMIT, top_p: 1.0}
+execution:
+  batch_size: 50
+  batch_jobs: 1
+  model_jobs: 1
+  max_output_tokens: 8192
+  timeout: 300
+  max_retries: 2
+  retry_backoff: 3
+tqa:
+  reference_mode: "no_reference"
+  dimension_instances:
+    领域术语: {description: "Project-specific terminology and proper names."}
+    话语体系: {description: "Ideological, religious, or subculture discourse."}
+    长句/复杂句: {description: "Dense syntax, logic, and information preservation."}
+    习语/口语: {description: "Idiomatic and natural spoken-language transfer."}
+    上下文依赖: {description: "Meaning resolved using story and neighboring cues."}
+    正式语体: {description: "Formal, official, legal, or ceremonial register."}
+    非母语口语: {description: "Readable preservation of non-native speech."}
+    情感张力: {description: "Emotion, dramatic force, and rhythm."}
+    讽刺: {description: "Irony, implication, wordplay, and black humor."}
+  dimension_weights:
+    领域术语: 0.12
+    话语体系: 0.08
+    长句/复杂句: 0.15
+    习语/口语: 0.12
+    上下文依赖: 0.20
+    正式语体: 0.06
+    非母语口语: 0.02
+    情感张力: 0.13
+    讽刺: 0.12
+  # Report-only: never changes dimension, episode, or model decisions.
+  sample_aggregation: "weighted_avg"
+  severity_thresholds:
+    critical_upper: 3
+    major_upper: 5
+    minor_upper: 7
+  hard_failures:
+    enabled:
+      - SEMANTIC_INVERSION
+      - IDENTITY_CONFUSION
+      - CRITICAL_OMISSION
+      - FABRICATION
+    max_hard_failures_per_episode: 3
+  thresholds:
+    dimension_floor: 4.0
+    episode_pass: 6.5
+    model_pass: 6.5
+    hard_failure_veto: true
+  conditional_pass:
+    # Every max_* field is an inclusive upper bound.
+    max_failed_dimensions: 2
+    max_hard_failures_per_episode: 3
+  refusal_handling:
+    mode: "count_and_mark"
+    default_score: 0
+    mark_as_hard_failure: true
+    hard_failure_type: "CRITICAL_OMISSION"
+evaluator:
+  model: "qwen3.7-max"
+  runs: 3
+  temperature: 0.3
+  context_window: 5
+  divergence_threshold: 3
+  divergence_action: "re_evaluate"
+  re_evaluate_extra_runs: 2
+  final_score: "median"
+  random_seed: 20260811
+  max_retries: 2
+  max_output_tokens: 2048
+  timeout: 300
+output:
+  root: "./out/tqa-bench"

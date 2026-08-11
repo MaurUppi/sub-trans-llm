@@ -5,7 +5,7 @@
   python main.py ping
   python main.py smoke --srt ... --max-cues 8 --models all
   python main.py run   --srt ... --model deepseek-v4-flash
-  python main.py bench --srt ... --jobs 1
+  python main.py bench --all --profile path/to/profile.yaml
   python main.py selfcheck --srt ...
 """
 
@@ -460,20 +460,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
-    models = _parse_models(args.models)
-    out_dir = Path(args.out) if args.out else _default_out("bench")
-    if args.max_output_tokens is None:
-        args.max_output_tokens = 131072
-    if args.timeout is None:
-        args.timeout = 1200.0
-    if getattr(args, "batch_size", None) is None:
-        args.batch_size = 50
-    print(
-        f"bench: models={models} model_jobs={args.jobs} "
-        f"batch_size={args.batch_size} batch_jobs={args.batch_jobs} "
-        f"max_cues={args.max_cues} out={out_dir}"
+    if bool(args.bench_all) == bool(args.bench_action):
+        print("bench: 必须且只能指定一个阶段或 --all", file=sys.stderr)
+        return 2
+    from pipeline.tqa.runner import run_bench
+
+    return run_bench(
+        profile_path=Path(args.profile),
+        action="all" if args.bench_all else args.bench_action,
     )
-    return _dispatch(models, args, out_dir)
 
 
 def _dispatch(
@@ -847,9 +842,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_run)
 
-    sp = sub.add_parser("bench", help="多模型 benchmark")
-    add_common(sp)
-    sp.add_argument("--models", default="all")
+    sp = sub.add_parser(
+        "bench",
+        help="配置驱动的多模型 TQA 评测",
+        allow_abbrev=False,
+    )
+    sp.add_argument(
+        "bench_action",
+        nargs="?",
+        choices=("plan", "collect", "evaluate", "report", "status"),
+        help="单独执行一个阶段；完整流水线使用 --all",
+    )
+    sp.add_argument(
+        "--all",
+        action="store_true",
+        dest="bench_all",
+        help="自动执行至 awaiting_user_decision",
+    )
+    sp.add_argument(
+        "--profile",
+        required=True,
+        help="统一 TQA YAML Profile 路径",
+    )
     sp.set_defaults(func=cmd_bench)
 
     return p

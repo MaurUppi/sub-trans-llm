@@ -1,0 +1,41 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+additionalProperties: false
+required:
+  - sample_id
+  - dimension
+  - score
+  - hard_failures
+  - rationale
+  - confidence
+  - evaluator_run_id
+  - anonymous_id
+  - candidate_id
+  - scored_by
+  - refusal_detected
+  - raw_response_hash
+  - raw_response_path
+  - valid
+  - retry_index
+  - run_index
+properties:
+  sample_id: {type: string, minLength: 1}
+  dimension: {type: string, minLength: 1}
+  score: {type: integer, minimum: 0, maximum: 10}
+  hard_failures:
+    type: array
+    uniqueItems: true
+    items:
+      enum: [SEMANTIC_INVERSION, IDENTITY_CONFUSION, CRITICAL_OMISSION, FABRICATION, OFFENSIVE_MISTRANSLATION]
+  rationale: {type: string, minLength: 1}
+  confidence: {type: number, minimum: 0, maximum: 1}
+  evaluator_run_id: {type: string, minLength: 1}
+  anonymous_id: {type: string}
+  candidate_id: {type: string}
+  scored_by: {enum: [evaluator, system]}
+  refusal_detected: {type: boolean}
+  raw_response_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+  raw_response_path: {type: string}
+  valid: {const: true}
+  retry_index: {type: integer, minimum: 0}
+  run_index: {type: integer, minimum: 0}

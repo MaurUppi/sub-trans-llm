@@ -262,3 +262,25 @@ def test_smoke_records_a_model_exception_instead_of_crashing(
     assert summary[0]["ok"] is False
     assert "provider unavailable" in summary[0]["status"]
     assert summary[0]["api_mode"] == "responses"
+
+
+def test_bench_all_uses_one_profile_without_inline_experiment_overrides() -> None:
+    parser = main.build_parser()
+
+    args = parser.parse_args(
+        ["bench", "--all", "--profile", "bench-profile.yaml"]
+    )
+
+    assert args.bench_all is True
+    assert args.profile == "bench-profile.yaml"
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "bench",
+                "--all",
+                "--profile",
+                "bench-profile.yaml",
+                "--models",
+                "qwen3.7-plus",
+            ]
+        )

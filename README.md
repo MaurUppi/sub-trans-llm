@@ -2,7 +2,7 @@
 
 一个多语言译简中字幕工具：读取 SRT，以 JSON 协议调用 OpenAI 兼容模型，校验原文回显与条目完整性，并输出“译文在上、原文在下”的双语 SRT。源语言默认英语、目标语言默认简体中文；在模型能力范围内，可通过 `--source-language` 和 `--target-language` 显式指定其他语言。
 
-默认使用 Chat Completions API；可通过 `--APImode Responses` 复核 Responses API 路径。当前内置火山方舟与阿里云百炼的六个模型 alias，并支持外部 prompt、CSV/Markdown Glossary、剧集摘要、分批并发、失败重试、字幕前处理和已有运行修复。
+默认使用 Chat Completions API；可通过 `--APImode Responses` 复核 Responses API 路径。当前内置火山方舟与阿里云百炼的六个模型 alias，并支持外部 prompt、CSV/Markdown Glossary、剧集摘要、分批并发、失败重试、字幕前处理、已有运行修复，以及配置驱动的匿名 TQA v2 多模型评测。
 
 ## 主要能力
 
@@ -13,6 +13,7 @@
 - 失败批重试；必要时按更小 sub-batch 继续定位与补采。
 - 可选 Stage A 前处理，以及最终双语 SRT 交付。
 - CSV Glossary 原生支持 `source,target,note` 表头，也兼容既有 Markdown 表格。
+- `bench --all --profile ...` 从单一 YAML 冻结实验参数，完成收集、匿名评分、聚合与可恢复报告。
 
 ## 仓库结构
 
@@ -20,8 +21,9 @@
 main.py                    # ping/selfcheck/repair/smoke/preprocess/run/bench
 model_client.py            # Chat/Responses 适配、模型配置与调用
 translate.py               # pipeline 公共 API 的兼容 re-export
-pipeline/                  # 翻译、校验、repair 与前处理实现
+pipeline/                  # 翻译、校验、repair、前处理与 TQA 实现
 pipeline/prompts/          # 公开运行时 prompt
+pipeline/tqa/              # TQA v2 Framework、Schema、默认 Profile 与流水线
 scripts/                   # 手动 API 兼容性 smoke 工具
 tests/                     # 自包含 pytest 回归测试
 ```
@@ -43,7 +45,7 @@ cp .env.example .env
 
 ## 快速开始
 
-所有读取字幕的命令都要求显式传入 `--srt`。
+`run` 的稳定 CLI 契约只有 `--srt` 与 `--model` 必填；其余参数均有默认值并可显式覆盖。`bench` 不接受行内实验参数，字幕、模型、采样臂与运行控制统一从 `--profile` 指定的 YAML 读取。
 
 ```bash
 # 离线解析与校验，不调用 API
@@ -67,12 +69,9 @@ python main.py run \
   --glossary /path/to/glossary.csv \
   --output /path/to/input.zh.srt
 
-# 多模型 benchmark
-python main.py bench \
-  --srt /path/to/input.srt \
-  --models all \
-  --jobs 2 \
-  --out out/bench
+# 复制并编辑统一 TQA Profile，再完成自动流水线
+cp pipeline/tqa/profile.default.yaml /path/to/my-tqa-profile.yaml
+python main.py bench --all --profile /path/to/my-tqa-profile.yaml
 ```
 
 `run` 不接受 `--out`。省略 `--output` 时，最终文件默认写到输入 SRT 同目录，文件名为 `{stem}_zh.srt`；显式指定时严格写入该路径。内部运行证据仍写入自动生成的 `out/run_<model>_<timestamp>/`。
@@ -101,18 +100,40 @@ python main.py bench \
 | `--glossary` | 默认不注入；可传 CSV 或 Markdown 路径 |
 | `--batch-size` | 50；`≤0` 表示整包一批 |
 | `--batch-jobs` | 1；大于 1 时同一模型多批并行 |
-| `--jobs` | 1；多模型命令的模型并发数 |
+| `--jobs` | 1；`smoke` 等传统多模型命令的模型并发数；bench 使用 Profile 的 `execution.model_jobs` |
 | `--temperature` | `[0,2)`；默认 OMIT |
 | `--top-p` | `(0,1]`；默认 OMIT |
-| `--max-output-tokens` | run/smoke/repair 8192，bench 131072；可显式覆盖 |
-| `--timeout` | run/repair 300 秒，smoke 180 秒，bench 1200 秒 |
+| `--max-output-tokens` | run/smoke/repair 默认 8192；bench 由 Profile 显式冻结，默认 Profile 为 8192 |
+| `--timeout` | run/repair 默认 300 秒，smoke 默认 180 秒；bench 默认 Profile 为 300 秒 |
 | `--max-retries` | 2 次额外重试 |
 | `--retry-backoff` | 3 秒指数退避基数 |
 | `--no-summary` | 跳过默认剧集摘要 |
 | `--output` | 仅 `run`；默认与输入同目录 |
-| `--out` | smoke/bench/preprocess 等目录型产物 |
+| `--out` | smoke/preprocess 等目录型产物；run 不接受，bench 使用 Profile 的 `output.root` |
 
 同时显式指定 `temperature` 和 `top_p` 时，CLI 会警告但不阻断。`OMIT` 只表示请求体未发送该字段，不代表不同 Provider 使用相同的数值默认值。
+
+## TQA v2 benchmark
+
+`bench` 与生产 `run` 分工明确：`run` 交付一个模型的一份字幕；`bench` 比较 Profile 中明确定义的模型与采样参数臂，并执行 TQA v2 评测。公开接口只有两种形式：
+
+```bash
+# 完整执行；最终停在 awaiting_user_decision，不替代人工确认
+python main.py bench --all --profile /path/to/profile.yaml
+
+# 分阶段执行
+python main.py bench plan     --profile /path/to/profile.yaml
+python main.py bench collect  --profile /path/to/profile.yaml
+python main.py bench evaluate --profile /path/to/profile.yaml
+python main.py bench report   --profile /path/to/profile.yaml
+python main.py bench status   --profile /path/to/profile.yaml
+```
+
+`plan` 将 Profile 内相对路径按 Profile 所在目录解析，并在 `output.root` 下冻结 `profile.source.yaml`、`profile.resolved.yaml`、`profile.lock.json` 与 `manifest.json`。同一输出目录若检测到不同 Profile 哈希会拒绝复用。`collect` 按 `model_jobs` 并行模型、按 `batch_jobs` 并行单模型分批；`generate_once` 摘要会按“模型 × 集”冻结并由该模型的后续参数臂复用。
+
+匿名评分输入位于 `anonymized/`，不包含模型、Provider、参数臂、原始文件名/路径或 refusal/rescue 来源；解盲映射通过私有临时文件原子写入权限为 `0600` 的 `blind_map.json`。Evaluator 输出必须满足发布的 Schema，非法输出按预算重试，重复 `evaluator_run_id` 作为程序错误立即终止。Provider refusal 固定由系统记 0 并计入分母，技术故障单独统计且不进入质量分母。若 collect 后的候选记录提供 `rescued_translations`，它会进入独立匿名评分 lane，只生成 `rescued_quality_score`，绝不覆盖 refusal 主评分或进入模型总分；默认翻译 adapter 不自行制造 rescue。
+
+聚合路径固定为“样例 × 维度原始分 → 集内维度平均分 → 维度加权集分 → 按有效样例数加权模型分”。`sample_aggregation` 仅用于报告展示；所有 `max_*` 是包含上界；状态优先级为 `VETO > FAIL > CONDITIONAL_PASS > PASS`。通用规范和机器契约位于 `pipeline/tqa/`，用户只需维护一份 YAML Profile。
 
 ## Glossary
 
@@ -223,6 +244,8 @@ SOURCE TEXT
 
 ```bash
 python main.py selfcheck --srt /path/to/input.srt
+# 无 API、真实文件 I/O 的 bench 端到端 smoketest
+PYTHONPATH=. pytest -q tests/test_tqa_bench.py::test_bench_all_offline_smoke_runs_end_to_end_and_resumes
 PYTHONPATH=. pytest -q
 git diff --check
 ```
