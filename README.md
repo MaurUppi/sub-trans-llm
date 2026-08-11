@@ -131,6 +131,10 @@ python main.py bench status   --profile /path/to/profile.yaml
 
 `plan` 将 Profile 内相对路径按 Profile 所在目录解析，并在 `output.root` 下冻结 `profile.source.yaml`、`profile.resolved.yaml`、`profile.lock.json` 与 `manifest.json`。同一输出目录若检测到不同 Profile 哈希会拒绝复用。`collect` 按 `model_jobs` 并行模型、按 `batch_jobs` 并行单模型分批；`generate_once` 摘要会按“模型 × 集”冻结并由该模型的后续参数臂复用。
 
+Profile 中的 `source_srt` 始终作为整份字幕进入 collect；`inputs.episodes[].samples` 只指定随后进入 TQA evaluator 评分的定向条目，不会限制翻译范围。若要逐条评分整份字幕，需要将全部 cue 列入 `samples`，相应的评分调用量和费用也会显著增加。
+
+`sampling.arms[].temperature/top_p` 控制候选翻译模型，是被比较的实验变量；`evaluator.temperature` 只控制匿名裁判模型评分时的随机性，不会改变任何候选译文。Evaluator 的任务是针对每个“样例 × 维度”读取匿名源文、候选译文及上下文，输出 0–10 分、硬失败类别、理由与置信度；为提高多轮评分一致性，通常使用较低的 evaluator temperature。
+
 匿名评分输入位于 `anonymized/`，不包含模型、Provider、参数臂、原始文件名/路径或 refusal/rescue 来源；解盲映射通过私有临时文件原子写入权限为 `0600` 的 `blind_map.json`。Evaluator 输出必须满足发布的 Schema，非法输出按预算重试，重复 `evaluator_run_id` 作为程序错误立即终止。Provider refusal 固定由系统记 0 并计入分母，技术故障单独统计且不进入质量分母。若 collect 后的候选记录提供 `rescued_translations`，它会进入独立匿名评分 lane，只生成 `rescued_quality_score`，绝不覆盖 refusal 主评分或进入模型总分；默认翻译 adapter 不自行制造 rescue。
 
 聚合路径固定为“样例 × 维度原始分 → 集内维度平均分 → 维度加权集分 → 按有效样例数加权模型分”。`sample_aggregation` 仅用于报告展示；所有 `max_*` 是包含上界；状态优先级为 `VETO > FAIL > CONDITIONAL_PASS > PASS`。通用规范和机器契约位于 `pipeline/tqa/`，用户只需维护一份 YAML Profile。

@@ -404,7 +404,8 @@ def test_default_profile_freezes_the_ten_explicit_sampling_arms() -> None:
         / "tqa"
         / "profile.default.yaml"
     )
-    profile = yaml.safe_load(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    profile = yaml.safe_load(text)
 
     assert len(profile["sampling"]["arms"]) == 10
     assert profile["sampling"]["arms"][0] == {
@@ -420,6 +421,11 @@ def test_default_profile_freezes_the_ten_explicit_sampling_arms() -> None:
         "max_retries": 2,
         "retry_backoff": 3,
     }
+    assert text.index("一、必须根据实际情况修订的项目") < text.index("sampling:")
+    assert "collect 始终翻译 source_srt 的整份字幕" in text
+    assert "samples 只指定整份候选译文中哪些 cue 进入 evaluator" in text
+    assert "evaluator 是“评分模型/裁判”，不负责生成候选字幕" in text
+    assert "与 evaluator.temperature 完全独立" in text
 
 
 def test_collect_model_jobs_parallelizes_models_but_keeps_case_artifacts_isolated(

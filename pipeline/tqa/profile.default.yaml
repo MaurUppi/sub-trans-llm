@@ -1,66 +1,75 @@
-# Copy this file, replace paths/samples/models, then run:
+# Sub-trans-llm TQA v2 默认 Profile 模板
+#
+# 使用方法：复制本文件，先完成下方“必须修改”项目，再运行：
 #   python3 main.py bench --all --profile path/to/profile.yaml
-profile_version: "1.0"
+#
+# 标记说明：
+#   【必须修改】必须按本次作品或实验填写，不能直接照抄示例。
+#   【按需修改】默认值可以运行，但应根据实验目的确认。
+#   【通常保留】属于框架/判定默认值，没有明确理由时不建议修改。
+
+profile_version: "1.0" # 【通常保留】Profile 格式版本。
 framework:
-  version: "v2"
+  version: "v2" # 【通常保留】TQA 框架版本。
+
+# =============================================================================
+# 一、必须根据实际情况修订的项目
+# =============================================================================
+
 project:
-  name: "My subtitle translation evaluation"
-  source_language: "English"
-  target_language: "Simplified Chinese"
+  name: "我的字幕翻译评测" # 【必须修改】作品或本次实验名称。
+  source_language: "英语" # 【必须修改】源字幕语言。
+  target_language: "简体中文" # 【必须修改】目标字幕语言。
+
 inputs:
   episodes:
-    - id: "E01"
-      source_srt: "./path/to/source.srt"
+    - id: "E01" # 【必须修改】本集/本评估单元的唯一标识。
+      source_srt: "./path/to/source.srt" # 【必须修改】待翻译的完整 SRT。
+      # 【按需修改】single_reference 模式必须提供；no_reference 模式删除或注释。
       # reference_srt: "./path/to/reference.zh.srt"
+
+      # 【必须修改】TQA 定向评分条目。
+      # 重要：collect 始终翻译 source_srt 的整份字幕；samples 不会截断翻译范围。
+      # samples 只指定整份候选译文中哪些 cue 进入 evaluator 质量评分。
+      # TQA v2 通常采用定向抽样；若确需逐条评分整份字幕，应把全部 cue
+      # 逐条列入 samples，但会显著增加 evaluator 调用量和费用。
       samples:
-        - cue_id: 1
-          dimensions: ["上下文依赖"]
-          note: "Replace with a directed TQA sample and its test intent."
+        - cue_id: 1 # 【必须修改】对应 source_srt 中的字幕序号。
+          dimensions: ["上下文依赖"] # 【必须修改】该条目评测的 TQA 维度。
+          note: "说明该条字幕的具体翻译难点和测试意图。" # 【必须修改】评分提示。
+
 translation:
+  # 【必须修改】被比较的候选翻译模型；必须是 .env 已配置的 alias。
   models:
     - "deepseek-v4-flash"
     - "qwen3.7-plus"
-  api_mode: "ChatCompletion"
-  prompt: null
-  glossary: null
+  api_mode: "ChatCompletion" # 【按需修改】候选翻译使用的 API 模式。
+  prompt: null # 【按需修改】null 使用内置默认 prompt，也可填写自定义路径。
+  glossary: null # 【按需修改】可填写 CSV/Markdown Glossary 路径。
   summary:
-    # The first arm generates it; later arms for the same model/episode reuse it.
-    mode: "generate_once"
+    # 【按需修改】首个参数臂生成摘要；同一“模型 × 集”的后续参数臂复用。
+    mode: "generate_once" # 可选 generate_once 或 none。
     max_output_tokens: 4096
     timeout: 180
-sampling:
-  # Explicit arms only; this list is not expanded as a Cartesian product.
-  arms:
-    - {temperature: OMIT, top_p: OMIT}
-    - {temperature: 0.1, top_p: OMIT}
-    - {temperature: 0.3, top_p: OMIT}
-    - {temperature: 0.7, top_p: OMIT}
-    - {temperature: 1.0, top_p: OMIT}
-    - {temperature: 1.3, top_p: OMIT}
-    - {temperature: 1.5, top_p: OMIT}
-    - {temperature: OMIT, top_p: 0.7}
-    - {temperature: OMIT, top_p: 0.8}
-    - {temperature: OMIT, top_p: 1.0}
-execution:
-  batch_size: 50
-  batch_jobs: 1
-  model_jobs: 1
-  max_output_tokens: 8192
-  timeout: 300
-  max_retries: 2
-  retry_backoff: 3
+
 tqa:
+  # 【必须确认】无参考译文使用 no_reference；有可靠参考时使用 single_reference。
   reference_mode: "no_reference"
+  # single_reference 模式还必须增加：reference_role: "anchor" 或 "hint"
+
+  # 【必须修改】只保留本作品实际使用的维度，并写明作品级评分关注点。
   dimension_instances:
-    领域术语: {description: "Project-specific terminology and proper names."}
-    话语体系: {description: "Ideological, religious, or subculture discourse."}
-    长句/复杂句: {description: "Dense syntax, logic, and information preservation."}
-    习语/口语: {description: "Idiomatic and natural spoken-language transfer."}
-    上下文依赖: {description: "Meaning resolved using story and neighboring cues."}
-    正式语体: {description: "Formal, official, legal, or ceremonial register."}
-    非母语口语: {description: "Readable preservation of non-native speech."}
-    情感张力: {description: "Emotion, dramatic force, and rhythm."}
-    讽刺: {description: "Irony, implication, wordplay, and black humor."}
+    领域术语: {description: "本作品的专业术语、专有名词和统一译名。"}
+    话语体系: {description: "本作品的政治、宗教或亚文化话语体系。"}
+    长句/复杂句: {description: "复杂句法、逻辑关系和高密度信息保留。"}
+    习语/口语: {description: "习语、俚语及自然口语表达。"}
+    上下文依赖: {description: "需要结合剧情或相邻字幕才能确定的含义。"}
+    正式语体: {description: "正式、官方、法律或仪式性语体。"}
+    非母语口语: {description: "在可理解前提下保留非母语表达特征。"}
+    情感张力: {description: "情绪强度、戏剧张力与节奏。"}
+    讽刺: {description: "讽刺、言外之意、双关与黑色幽默。"}
+
+  # 【必须修改】按作品调整；所有权重之和必须为 1.0。
   dimension_weights:
     领域术语: 0.12
     话语体系: 0.08
@@ -71,7 +80,8 @@ tqa:
     非母语口语: 0.02
     情感张力: 0.13
     讽刺: 0.12
-  # Report-only: never changes dimension, episode, or model decisions.
+
+  # 【通常保留】仅影响报告中的样例排序/展示，不参与集分和模型分。
   sample_aggregation: "weighted_avg"
   severity_thresholds:
     critical_upper: 3
@@ -90,26 +100,63 @@ tqa:
     model_pass: 6.5
     hard_failure_veto: true
   conditional_pass:
-    # Every max_* field is an inclusive upper bound.
+    # 【通常保留】所有 max_* 都是包含上界，即实际值 <= 此值时仍在容忍范围。
     max_failed_dimensions: 2
     max_hard_failures_per_episode: 3
   refusal_handling:
+    # 【通常保留】Provider refusal 固定记 0，并保留硬失败标记。
     mode: "count_and_mark"
     default_score: 0
     mark_as_hard_failure: true
     hard_failure_type: "CRITICAL_OMISSION"
+
 evaluator:
-  model: "qwen3.7-max"
-  runs: 3
+  # evaluator 是“评分模型/裁判”，不负责生成候选字幕。
+  # 它逐一读取匿名化后的源文、候选译文、上下文和评分维度，再输出 0–10 分。
+  model: "qwen3.7-max" # 【必须修改】必须是 .env 已配置的评分模型 alias。
+  runs: 3 # 【按需修改】每个“样例 × 维度”的独立评分轮数。
+  # 【按需修改】仅控制裁判评分的随机性，不属于候选翻译参数臂。
+  # 为提高复评一致性，通常使用较低值（如 0–0.3）。
   temperature: 0.3
-  context_window: 5
-  divergence_threshold: 3
-  divergence_action: "re_evaluate"
-  re_evaluate_extra_runs: 2
-  final_score: "median"
-  random_seed: 20260811
-  max_retries: 2
+  context_window: 5 # 每条样例前后各提供多少条字幕作为评分上下文。
+  divergence_threshold: 3 # 多轮评分最大分差达到此值时视为分歧。
+  divergence_action: "re_evaluate" # 分歧后追加复评；也可用 flag_only。
+  re_evaluate_extra_runs: 2 # re_evaluate 时追加的评分轮数。
+  final_score: "median" # 多轮评分最终取中位数；也可用 mean/trimmed_mean。
+  random_seed: 20260811 # 固定匿名候选评分顺序，确保实验可复现。
+  max_retries: 2 # evaluator 请求或输出不合法时的额外重试次数。
   max_output_tokens: 2048
   timeout: 300
+
 output:
-  root: "./out/tqa-bench"
+  root: "./out/tqa-bench" # 【必须修改】建议每次实验使用独立输出目录。
+
+# =============================================================================
+# 二、候选翻译实验参数（按实验目的确认或修改）
+# =============================================================================
+
+sampling:
+  # 下列每一项都是候选翻译模型的一个显式参数臂。
+  # 不做笛卡尔积；OMIT 表示请求体不发送该字段，使用 Provider/模型默认值。
+  # 这里的 temperature/top_p 与 evaluator.temperature 完全独立。
+  arms:
+    - {temperature: OMIT, top_p: OMIT}
+    - {temperature: 0.1, top_p: OMIT}
+    - {temperature: 0.3, top_p: OMIT}
+    - {temperature: 0.7, top_p: OMIT}
+    - {temperature: 1.0, top_p: OMIT}
+    - {temperature: 1.3, top_p: OMIT}
+    - {temperature: 1.5, top_p: OMIT}
+    - {temperature: OMIT, top_p: 0.7}
+    - {temperature: OMIT, top_p: 0.8}
+    - {temperature: OMIT, top_p: 1.0}
+
+execution:
+  # 【按需修改】候选翻译 collect 阶段的执行参数；不控制 evaluator。
+  batch_size: 50
+  batch_jobs: 1
+  model_jobs: 1
+  max_output_tokens: 8192
+  timeout: 300
+  max_retries: 2
+  retry_backoff: 3
