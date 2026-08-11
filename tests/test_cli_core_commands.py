@@ -103,7 +103,7 @@ def test_preprocess_help_exposes_only_stage_a_options(capsys) -> None:
         parser.parse_args(["preprocess", "--help"])
 
     assert exc_info.value.code == 0
-    help_text = capsys.readouterr().out
+    help_text = " ".join(capsys.readouterr().out.split())
     assert "YouTube 滚动窗口自动字幕" in help_text
     assert "50ms" in help_text
     assert "英文单行超过 42 字符或超过 2 行" in help_text
@@ -143,6 +143,25 @@ def test_preprocess_help_exposes_only_stage_a_options(capsys) -> None:
         "--top-p",
     ):
         assert unused not in help_text
+
+
+def test_run_help_explains_automatic_process_artifact_lifecycle(capsys) -> None:
+    parser = main.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["run", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "成功时仅保留最终 SRT" in help_text
+    assert "失败时保留过程证据" in help_text
+
+
+def test_default_output_workspaces_are_unique() -> None:
+    first = main._default_out("run_qwen3.7-plus")
+    second = main._default_out("run_qwen3.7-plus")
+
+    assert first != second
 
 
 @pytest.mark.parametrize("command", ["preprocess", "run"])

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import model_client
 import translate
@@ -35,7 +37,7 @@ def _parse_models(spec: str) -> list[str]:
 
 def _default_out(prefix: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return _ROOT / "out" / f"{prefix}_{ts}"
+    return _ROOT / "out" / f"{prefix}_{ts}_{uuid4().hex[:8]}"
 
 
 def _write_summary(out_dir: Path, results: list[translate.TranslateResult]) -> None:
@@ -228,15 +230,18 @@ def _preprocess_config_from_args(
     )
 
 
-def _maybe_preprocess(args: argparse.Namespace) -> Path:
+def _maybe_preprocess(
+    args: argparse.Namespace,
+    *,
+    work_dir: Path | None = None,
+) -> Path:
     """If --preprocess, run Stage A and return clean SRT path; else original."""
     srt = Path(args.srt)
     if not getattr(args, "preprocess", False):
         return srt
     from pipeline.preprocess.orchestrate_a import run_preprocess
 
-    work = Path(args.out) / "_preprocess" if args.out else None
-    cfg = _preprocess_config_from_args(args, work_dir=work)
+    cfg = _preprocess_config_from_args(args, work_dir=work_dir)
     pr = run_preprocess(srt, cfg)
     assert pr.clean_srt_path is not None
     print(f"preprocess: clean → {pr.clean_srt_path}")
@@ -431,28 +436,41 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.batch_size = 50
     args._original_srt = Path(args.srt)
     try:
-        args._resolved_srt = _maybe_preprocess(args)
+        args._resolved_srt = _maybe_preprocess(
+            args,
+            work_dir=out_dir / "_preprocess",
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"前处理失败: {type(exc).__name__}: {exc}")
+        print(f"失败证据: {out_dir}")
+        return 1
     args.srt = str(args._resolved_srt)
     print(
         f"run: model={args.model} batch_size={args.batch_size} "
         f"batch_jobs={args.batch_jobs} "
         f"{_fmt_sampling(args)} "
         f"preprocess={bool(getattr(args, 'preprocess', False))} "
-        f"api_mode={args.api_mode} out={out_dir}"
+        f"api_mode={args.api_mode} workspace={out_dir}"
     )
-    code = _dispatch(models, args, out_dir)
+    try:
+        code = _dispatch(models, args, out_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"运行失败: {type(exc).__name__}: {exc}")
+        print(f"失败证据: {out_dir}")
+        return 1
     # re-load results for deliver? _dispatch doesn't return results.
     # Deliver from model out dir bilingual if present.
-    from pipeline.preprocess.deliver import default_zh_path, write_zh_srt
+    from pipeline.preprocess.deliver import write_zh_srt
     from model_client import Usage
     from pipeline.models import TranslateResult, ValidateReport
 
     model_out = out_dir / args.model.replace("/", "_")
     bi = model_out / "bilingual.srt"
-    if bi.is_file():
+    delivered = False
+    if code == 0 and bi.is_file():
         r = TranslateResult(
             model_alias=args.model,
             model_id="",
@@ -464,13 +482,32 @@ def cmd_run(args: argparse.Namespace) -> int:
             raw_text="",
             elapsed_sec=0.0,
         )
-        path = write_zh_srt(
-            r,
-            getattr(args, "_original_srt", Path(args.srt)),
-            output=getattr(args, "output", None),
-        )
+        try:
+            path = write_zh_srt(
+                r,
+                getattr(args, "_original_srt", Path(args.srt)),
+                output=getattr(args, "output", None),
+            )
+        except OSError as exc:
+            print(f"交付失败: {exc}")
+            print(f"失败证据: {out_dir}")
+            return 1
         if path:
             print(f"交付: {path}")
+            delivered = True
+    if code == 0 and delivered:
+        try:
+            shutil.rmtree(out_dir)
+        except OSError as exc:
+            print(f"警告: 临时运行目录清理失败: {exc} → {out_dir}")
+        else:
+            print("过程: 已清理临时运行目录")
+    elif code == 0:
+        print("交付失败: 未生成最终字幕")
+        print(f"失败证据: {out_dir}")
+        return 1
+    elif code != 0:
+        print(f"失败证据: {out_dir}")
     return code
 
 
@@ -874,7 +911,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "最终双语 SRT 文件路径；默认写到 --srt 同目录的 "
-            "{stem}_zh.srt"
+            "{stem}_zh.srt；成功时仅保留最终 SRT，失败时保留过程证据"
         ),
     )
     sp.set_defaults(func=cmd_run)

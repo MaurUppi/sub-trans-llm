@@ -75,7 +75,7 @@ cp pipeline/tqa/profile.default.yaml /path/to/my-tqa-profile.yaml
 python main.py bench --all --profile /path/to/my-tqa-profile.yaml
 ```
 
-`run` 不接受 `--out`。省略 `--output` 时，最终文件默认写到输入 SRT 同目录，文件名为 `{stem}_zh.srt`；显式指定时严格写入该路径。内部运行证据仍写入自动生成的 `out/run_<model>_<timestamp>/`。
+`run` 不接受 `--out`。省略 `--output` 时，最终文件自动写到输入 SRT 同目录，文件名为 `{stem}_zh.srt`；显式指定时严格写入该路径。运行期间会使用带唯一标识的临时 workspace：最终 SRT 成功写盘后自动清理，默认不留下过程目录；翻译失败、交付失败或未生成最终字幕时保留在 `out/run_<model>_<timestamp>_<id>/`，并打印“失败证据”路径供诊断和 `repair`。`run --preprocess` 的 Stage A 文件也属于该 workspace，成功后不会在输入目录旁遗留 `.preprocess_<stem>`。
 
 ## 检查与恢复命令
 
@@ -109,7 +109,7 @@ python main.py bench --all --profile /path/to/my-tqa-profile.yaml
 | `--max-retries` | 2 次额外重试 |
 | `--retry-backoff` | 3 秒指数退避基数 |
 | `--no-summary` | 跳过默认剧集摘要 |
-| `--output` | 仅 `run`；默认与输入同目录 |
+| `--output` | 仅 `run`；默认自动写入输入同目录的 `{stem}_zh.srt`；成功只保留最终 SRT，失败保留过程证据 |
 | `--out` | smoke/preprocess 等目录型产物；run 不接受，bench 使用 Profile 的 `output.root` |
 
 同时显式指定 `temperature` 和 `top_p` 时，CLI 会警告但不阻断。`OMIT` 只表示请求体未发送该字段，不代表不同 Provider 使用相同的数值默认值。
@@ -239,7 +239,7 @@ print(result.ok, result.validate.stats, result.sampling)
 
 ## 运行产物
 
-单模型运行目录通常包含：
+`smoke`、失败的 `run` 以及其他需要证据的单模型运行目录通常包含：
 
 ```text
 episode_summary.txt
