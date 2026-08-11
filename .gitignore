@@ -1,0 +1,28 @@
+.env
+.venv/
+venv/
+
+# Local agent context, research, issue tracking, and copyrighted test assets.
+/AGENTS.md
+/CLAUDE.md
+/CONTEXT.md
+/.scratch/
+/docs/
+/sample/
+
+# Local frozen-experiment workflow; it depends on excluded research assets.
+/pipeline/inspection_rescue.py
+/pipeline/sampling_matrix.py
+/tests/test_inspection_rescue.py
+/tests/test_sampling_matrix_runner.py
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+*.srt.zh*
+out/
+output/
+*.log
