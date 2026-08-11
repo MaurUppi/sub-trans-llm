@@ -803,7 +803,10 @@ def build_parser() -> argparse.ArgumentParser:
         overlap.add_argument(
             "--fix-overlaps",
             action="store_true",
-            help="强制启用时间轴去重叠（默认 auto：检测到重叠才修）",
+            help=(
+                "强制裁剪相邻 cue 重叠，主要用于 YouTube 滚动窗口自动字幕"
+                "（默认 auto：检测到至少一处 50ms 以上重叠后修复全部相邻重叠）"
+            ),
         )
         overlap.add_argument(
             "--no-fix-overlaps",
@@ -816,10 +819,21 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="移除口癖/重复（改原文）",
         )
-        sp.add_argument("--optimize", action="store_true", help="LLM 源文优化（条数不变）")
+        sp.add_argument(
+            "--optimize",
+            action="store_true",
+            help="LLM 优化源文并保持 cue 数量（必须同时指定 --model；失败即终止）",
+        )
         resplit = sp.add_mutually_exclusive_group()
-        resplit.add_argument("--resplit", action="store_true", help="强制重切过长字幕")
-        resplit.add_argument("--no-resplit", action="store_true", help="禁止重切")
+        resplit.add_argument(
+            "--resplit",
+            action="store_true",
+            help=(
+                "强制执行源字幕启发式重切（默认 auto：英文单行超过 42 字符或超过 2 行"
+                "时触发；非 Netflix 简中交付校验）"
+            ),
+        )
+        resplit.add_argument("--no-resplit", action="store_true", help="禁止源字幕启发式重切")
         sp.add_argument(
             "--words",
             default=None,
@@ -838,7 +852,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--model",
         default=None,
-        help="optimize/resplit-LLM 时使用的模型 alias",
+        help="--optimize 或带 --words 的语义重切所用模型 alias",
     )
     sp.set_defaults(func=cmd_preprocess)
 

@@ -104,6 +104,13 @@ def test_preprocess_help_exposes_only_stage_a_options(capsys) -> None:
 
     assert exc_info.value.code == 0
     help_text = capsys.readouterr().out
+    assert "YouTube 滚动窗口自动字幕" in help_text
+    assert "50ms" in help_text
+    assert "英文单行超过 42 字符或超过 2 行" in help_text
+    assert "非 Netflix" in help_text
+    assert "简中交付校验" in help_text
+    assert "必须同时指定 --model" in help_text
+    assert "失败即终止" in help_text
     for option in (
         "--srt",
         "--out",

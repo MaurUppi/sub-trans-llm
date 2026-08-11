@@ -191,7 +191,11 @@ python main.py repair \
 
 独立 `preprocess` 只接受 Stage A 相关参数：`--srt`、`--out`、`--fix-overlaps/--no-fix-overlaps`、`--remove-sdh`、`--remove-disfluency`、`--optimize`、`--resplit/--no-resplit`、`--words`、`--model` 和 `--APImode/--api-mode`。prompt、Glossary、语言、批处理、token、超时、重试、采样和摘要参数属于翻译阶段，不在该命令中出现。
 
-时间轴去重叠和重切默认使用 `auto`；正反开关互斥。`--optimize` 必须同时提供 `--model`，其 API 模式由 `--APImode` 选择；显式优化失败会终止 Stage A，不会静默跳过。`--words` 必须指向存在的词级时间戳 JSON。独立运行会写出 `input.srt`、`*.clean.srt`、`preprocess_meta.json` 和 `report.json`，供翻译前审查。
+时间轴去重叠和重切默认使用 `auto`；正反开关互斥。去重叠主要面向 YouTube 滚动窗口自动字幕：`auto` 检测到至少一处不小于 50ms 的相邻 cue 重叠后，才会裁剪全部相邻重叠；普通人工字幕通常无需强制启用。
+
+重切是翻译前的**源字幕启发式处理**。`auto` 在英文单行超过 42 字符或 cue 超过 2 行时启动；实际处理还会按源语言行长、行数和阅读速度决定是否拆分，把原时段按字符数比例分配，并在新 cue 间保留 40ms 间隔。它不等同于 Netflix 简体中文交付校验：Netflix 简中译文的默认指标是每行 16 字、最多 2 行、成人节目每秒最多 9 字；这些由翻译后的质量报告统计，Stage A 不保证自动消除全部问题。
+
+`--optimize` 会用 LLM 修正源文且保持 cue 数量，必须同时提供 `--model`；其 API 模式由 `--APImode` 选择。长字幕按每批 100 个可优化 cue 调用，逐批要求完整返回相同键集；纯 SDH/音效 cue 不进入模型并原样保留，只有显式 `--remove-sdh` 才会删除。解析失败、漏键或 API 失败都会终止 Stage A，不会静默跳过。`--words` 必须指向存在的词级时间戳 JSON。独立运行会写出 `input.srt`、`*.clean.srt`、`preprocess_meta.json` 和 `report.json`，供翻译前审查。
 
 Stage A 是启发式改善流程，不承诺消除全部行长、阅读速度或时间轴警告；结果应以 `report.json` 为准。`run` 中任何 Stage A 开关都必须与 `--preprocess` 同时使用，否则命令拒绝执行。LLM 步骤复用 `run --model`，不引入第二个模型参数。
 
