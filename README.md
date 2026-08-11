@@ -12,8 +12,8 @@
 
 ## 主要能力
 
-- 六个模型 alias 统一走 OpenAI SDK Responses API。
-- Ark 使用 `thinking={"type":"disabled"}`，阿里云使用 `reasoning={"effort":"none"}`，显式关闭思考。
+- 六个模型 alias 统一走 OpenAI SDK；默认 Chat Completions，可用 `--APImode Responses` 切换旧路径。
+- Ark 两种模式都使用 `thinking={"type":"disabled"}`；阿里云 Chat 使用 `enable_thinking=False`，Responses 使用 `reasoning={"effort":"none"}`，均显式关闭思考。
 - `temperature` / `top_p` 默认均不写入请求体；只有 CLI 或 Python 调用显式给值时才发送。
 - 可先通读当前输入范围生成剧集摘要，再按默认 50 cue 分批翻译。
 - JSON 加固、键集合校验、`src` 回显对齐和字幕质量度量。
@@ -25,7 +25,7 @@
 
 ```text
 main.py                    # 通用 CLI：ping/selfcheck/repair/smoke/preprocess/run/bench
-model_client.py            # 六模型 Responses API 适配、.env、采样字段 OMIT 语义
+model_client.py            # 六模型 Chat/Responses 适配、.env、采样字段 OMIT 语义
 translate.py               # pipeline 公共 API 的兼容 re-export
 pipeline/                  # 字幕翻译、校验、repair、前处理与矩阵采集实现
 sample/                    # 两集全量源字幕、Low 中文参考与 TQA 重点检查材料
@@ -81,8 +81,11 @@ cp .env.example .env
 ## 通用 CLI
 
 ```bash
-# 六模型最小连通检查；会产生真实 API 调用
+# 六模型最小连通检查；默认 Chat Completions，会产生真实 API 调用
 python main.py ping
+
+# 保留的 Responses 路径回归
+python main.py ping --APImode Responses
 
 # 使用当前默认 E03 样例做离线解析/校验自检
 python main.py selfcheck
@@ -92,17 +95,18 @@ PYTHONPATH=. pytest -q
 
 # 默认取前 8 个 cue 的烟测
 python main.py smoke \
+  --APImode ChatCompletion \
   --models deepseek-v4-flash \
   --out out/smoke_flash
 
-# 单模型全量；默认 50 cue/批、batch_jobs=1、启用摘要
+# 单模型全量；默认 50 cue/批、batch_jobs=1、max_output_tokens=8192、timeout=300
 python main.py run \
+  --APImode ChatCompletion \
   --srt sample/A.French.Village.S01E03_eng.srt \
   --model deepseek-v4-flash \
-  --glossary docs/Un_Village_francais_Glossary.md \
+  --glossary docs/Un_Village_francais_Glossary.csv \
   --batch-size 50 \
   --batch-jobs 1 \
-  --out out/run_flash_full \
   --output out/run_flash_full_bilingual.srt
 
 # 多模型 benchmark；jobs 是模型并发数，batch-jobs 是单模型批并发数
@@ -131,33 +135,52 @@ python main.py run \
   --model deepseek-v4-flash \
   --preprocess \
   --remove-sdh \
-  --out out/run_preprocessed
+  --output out/run_preprocessed_bilingual.srt
 ```
 
 ### 常用参数
 
 | 参数 | 当前行为 / 默认值 |
 |---|---|
+| `--APImode` / `--api-mode` | `ChatCompletion`（默认）；也接受 `Responses`，内部记录为 `chat_completions` / `responses` |
 | `--srt` | `sample/A.French.Village.S01E03_eng.srt` |
 | `--model` / `--models` | 单个 alias、逗号列表或 `all` |
-| `--glossary` | 默认不注入；给路径才加入 instructions |
+| `--glossary` | `smoke` / `run` / `bench` 默认不注入，必须显式给路径；推荐 UTF-8 CSV，表头固定为 `source,target,note`，兼容原 Markdown 表格；`repair` 复用原 run 的 `instructions.txt` |
 | `--batch-size` | 50；`≤0` 表示整包一批 |
 | `--batch-jobs` | 1；大于 1 时同一模型多批并行 |
 | `--jobs` | 1；多模型命令的模型并发数 |
 | `--temperature` | `[0,2)`；默认 OMIT，不向 API 发送 |
 | `--top-p` | `(0,1]`；默认 OMIT，不向 API 发送 |
-| `--max-output-tokens` | run/bench 131072，smoke 8192 |
-| `--no-summary` | 默认生成摘要；传入后跳过 |
+| `--max-output-tokens` | run/smoke/repair 8192，bench 131072；50-cue 现有生产证据的单批峰值为 3549，仍可显式调高 |
+| `--timeout` | run/repair 300 秒，smoke 180 秒，bench 1200 秒；可显式覆盖 |
+| `--no-summary` | `smoke` / `run` / `bench` 默认生成摘要；传入后跳过 |
 | `--max-retries` / `--retry-backoff` | 2 次额外重试 / 3 秒指数退避 |
-| `--out` | 内部证据目录；默认写入带时间戳的 `out/` 子目录 |
-| `--output` | `run` 成功后的最终双语 SRT；默认写到源字幕旁边 `{stem}_zh.srt` |
+| `--out` | 仅用于 `smoke` / `bench` / `preprocess` 等目录型产物；`run` 已废弃该参数 |
+| `--output` | `run` 的最终双语 SRT 文件路径；默认写到 `--srt` 同目录的 `{stem}_zh.srt`，显式指定则严格写到该路径；内部证据目录自动生成 |
 
 同时显式指定 `temperature` 和 `top_p` 时 CLI 会警告但不阻断。做可归因实验时建议一次只改变一个；`OMIT` 只表示字段未发送，不能写成跨 Provider 的共同数值。
+
+### Glossary CSV
+
+通用翻译命令推荐显式传入 `docs/Un_Village_francais_Glossary.csv`。CSV 使用
+`source,target,note` 表头；`note` 可以留空，存在时会随 `source = target` 映射一起注入
+instructions。UTF-8 BOM 和带引号的逗号字段均受支持。最终发送给模型的完整内容会写入运行目录的
+`instructions.txt`；Chat Completions 将它作为第一条 `system` message，Responses 则使用独立的
+`instructions` 字段。
+
+```csv
+source,target,note
+Daniel Larcher,达尼埃尔·拉尔谢,维勒纳夫市长/大夫
+Villeneuve,维勒纳夫,故事主要发生地
+```
+
+冻结 40-case 矩阵仍固定使用 Markdown 版 Glossary，以保持既有实验哈希与续跑契约不变。
 
 ## 修复已有 run
 
 ```bash
 python main.py repair \
+  --APImode Responses \
   --run-dir out/run_xxx/qwen3.7-plus \
   --model qwen3.7-plus \
   --srt sample/A.French.Village.S01E03_eng.srt \
@@ -168,12 +191,14 @@ python main.py repair \
 
 - 未指定 `--batches` 时，根据 `meta.json` 的失败批或缺键推断。
 - 整批仍失败时，默认按 10→5→2→1 cue 缩小；Provider 仍可拒绝单 cue，repair 不保证成功。
-- repair 必须沿用原测试的显式采样参数；省略字段时继续使用 OMIT。
+- repair 必须沿用原 run 的 API 模式与显式采样参数；旧 Responses run 要写 `--APImode Responses`，省略采样字段时继续使用 OMIT。
 - 主 attempt、批目录、`repair.json`、合并后的 `parsed.json` 和最终 SRT 共同构成证据，不能只看最后的 `status`。
 
 ## 冻结 40-case 参数矩阵
 
 `pipeline.sampling_matrix` 是当前 Opus 4.6-Low 对齐采集器，不是通用六模型 benchmark。它固定：
+
+- API 模式：`Responses`。这是已冻结采集契约；通用 CLI 改为默认 Chat 后，矩阵内部仍显式固定 Responses，避免续跑混入不同 wire contract。
 
 - 模型：`deepseek-v4-flash`、`qwen3.7-plus`。
 - 剧集：S01E03（747 cue）、S01E06（647 cue）。
@@ -300,13 +325,19 @@ self_check_offline("sample/A.French.Village.S01E03_eng.srt")
 result = run_once(
     srt_path="sample/A.French.Village.S01E03_eng.srt",
     model="deepseek-v4-flash",
-    glossary_path="docs/Un_Village_francais_Glossary.md",
+    glossary_path="docs/Un_Village_francais_Glossary.csv",
     batch_size=50,
     batch_jobs=1,
+    max_output_tokens=8192,
+    timeout=300,
+    api_mode="ChatCompletion",
     out_dir="out/demo/deepseek-v4-flash",
 )
 print(result.ok, result.validate.stats, result.sampling)
 ```
+
+`run_once` 是较早的库级接口，若不显式传入，上限/超时仍为
+`max_output_tokens=131072`、`timeout=1200`；上例显式使用当前 `main.py run` 的生产默认值。
 
 直连模型：
 
@@ -320,15 +351,17 @@ result = call(
     temperature=OMIT,
     top_p=OMIT,
     max_output_tokens=16,
+    # 默认 ChatCompletion；复核旧路径时传 api_mode="Responses"
 )
-print(result.ok, result.text, result.usage)
+print(result.ok, result.api_mode, result.text, result.usage)
 ```
 
 ## 文档口径
 
 - [`docs/baseinfo.md`](docs/baseinfo.md)：当前 API、模型配置、采样 OMIT 语义和校验结论。
 - [`docs/translation_prompt.md`](docs/translation_prompt.md)：翻译 instructions 模板。
-- [`docs/Un_Village_francais_Glossary.md`](docs/Un_Village_francais_Glossary.md)：本剧 Glossary。
+- [`docs/Un_Village_francais_Glossary.csv`](docs/Un_Village_francais_Glossary.csv)：通用翻译命令推荐的 `source,target,note` Glossary。
+- [`docs/Un_Village_francais_Glossary.md`](docs/Un_Village_francais_Glossary.md)：冻结 40-case 矩阵继续使用的 Markdown Glossary。
 - [`docs/deepseek-qwen-temperature-top-p-defaults.md`](docs/deepseek-qwen-temperature-top-p-defaults.md)：两 Provider 的采样参数证据。
 - [`sample/字幕翻译质量评估框架_TQA_v1.md`](sample/字幕翻译质量评估框架_TQA_v1.md)：当前 TQA 评价维度与样例规则。
 - [`docs/quality_control.md`](docs/quality_control.md)：早期六模型固定 `1.0/1.0` 对比协议；不代表当前 CLI 默认值，也不覆盖冻结两模型矩阵。

@@ -26,6 +26,7 @@ def generate_episode_summary(
     max_retries: int = 2,
     retry_backoff_sec: float = 3.0,
     out_dir: Optional[Path] = None,
+    api_mode: str = model_client.DEFAULT_API_MODE,
 ) -> tuple[str, Usage, str, Optional[str]]:
     """
     全量字幕通读 → 摘要。
@@ -58,6 +59,7 @@ def generate_episode_summary(
                 top_p=top_p,
                 max_output_tokens=max_output_tokens,
                 timeout=timeout,
+                api_mode=api_mode,
             )
             raw = (mr.text or "").strip()
             status = mr.status

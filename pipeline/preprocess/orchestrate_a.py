@@ -92,7 +92,11 @@ def run_preprocess(
         try:
             from pipeline.preprocess.vc_optimize_adapter import optimize_document
 
-            document, opt_meta = optimize_document(document, model=config.model)
+            document, opt_meta = optimize_document(
+                document,
+                model=config.model,
+                api_mode=config.api_mode,
+            )
             meta["backends"]["optimize"] = "pipeline.preprocess.vc_optimize_adapter"
             meta["notes"].extend(opt_meta.get("notes") or [])
         except Exception as e:  # noqa: BLE001
@@ -127,7 +131,10 @@ def run_preprocess(
                 from pipeline.preprocess.vc_split_adapter import resplit_with_vc
 
                 document, sp_meta = resplit_with_vc(
-                    document, words_path=Path(config.words_path), model=config.model
+                    document,
+                    words_path=Path(config.words_path),
+                    model=config.model,
+                    api_mode=config.api_mode,
                 )
                 meta["backends"]["resplit"] = "pipeline.preprocess.vc_split_adapter"
                 meta["notes"].extend(sp_meta.get("notes") or [])

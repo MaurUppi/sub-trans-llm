@@ -286,6 +286,7 @@ def execute_case(
             batch_jobs=1,
             use_episode_summary=True,
             episode_summary_override=episode_summary_override,
+            api_mode=model_client.API_MODE_RESPONSES,
         )
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(timezone.utc).isoformat()
@@ -506,6 +507,7 @@ def repair_failed_cases(
                 temperature=temperature,
                 top_p=top_p,
                 sub_batch_size=10,
+                api_mode=model_client.API_MODE_RESPONSES,
             )
         except Exception as exc:  # noqa: BLE001
             finished_at = datetime.now(timezone.utc).isoformat()
@@ -663,6 +665,7 @@ def rescue_inspection_blocked_cases(
                 model=case.model_alias,
                 temperature=temperature,
                 top_p=top_p,
+                api_mode=model_client.API_MODE_RESPONSES,
             )
         except Exception as exc:  # noqa: BLE001
             finished_at = datetime.now(timezone.utc).isoformat()
@@ -769,6 +772,7 @@ def generate_frozen_summaries(
             max_retries=2,
             retry_backoff_sec=3.0,
             out_dir=context_dir,
+            api_mode=model_client.API_MODE_RESPONSES,
         )
         summary = (summary or "").strip()
         if error or status != "completed" or not summary:
@@ -783,6 +787,7 @@ def generate_frozen_summaries(
             "source_sha256": source_sha256,
             "cue_count": len(cues),
             "generator_model_alias": model_alias,
+            "api_mode": model_client.API_MODE_RESPONSES,
             "sampling": _sampling_evidence(
                 model_client.OMIT,
                 model_client.OMIT,

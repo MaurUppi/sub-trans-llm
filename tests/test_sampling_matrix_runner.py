@@ -205,6 +205,7 @@ def test_execute_case_is_serial_recorded_and_resumable(tmp_path: Path) -> None:
     assert calls[0]["top_p"] is model_client.OMIT
     assert calls[0]["episode_summary_override"] == "frozen context"
     assert calls[0]["glossary_path"] == glossary
+    assert calls[0]["api_mode"] == "responses"
     final_path = output_root / "bilingual" / case.final_filename
     assert final_path.read_text(encoding="utf-8").startswith("1\n")
     record = json.loads(
@@ -296,6 +297,7 @@ def test_failed_case_repair_preserves_sampling_and_publishes_final_output(
     assert calls[0]["temperature"] == 0.3
     assert calls[0]["top_p"] is model_client.OMIT
     assert calls[0]["sub_batch_size"] == 10
+    assert calls[0]["api_mode"] == "responses"
     final_path = output_root / "bilingual" / case.final_filename
     assert final_path.read_text(encoding="utf-8").startswith("1\n")
     repaired = json.loads(case_path.read_text(encoding="utf-8"))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 from typing import Optional
@@ -8,11 +9,38 @@ from pipeline.config import DEFAULT_GLOSSARY, DEFAULT_PROMPT
 from pipeline.models import Cue
 
 
+def _compact_csv_glossary(path: Path) -> str:
+    """Load the supported CSV contract: source,target,note."""
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [name.strip() for name in (reader.fieldnames or [])]
+        required = ["source", "target", "note"]
+        if any(name not in fieldnames for name in required):
+            raise ValueError(
+                f"CSV glossary must use header source,target,note: {path}"
+            )
+
+        lines_out: list[str] = []
+        seen: set[str] = set()
+        for row in reader:
+            source = " ".join((row.get("source") or "").split())
+            target = " ".join((row.get("target") or "").split())
+            note = " ".join((row.get("note") or "").split())
+            if not source or not target or source in seen:
+                continue
+            seen.add(source)
+            suffix = f"（{note}）" if note else ""
+            lines_out.append(f"{source} = {target}{suffix}")
+        return "\n".join(lines_out)
+
+
 def compact_glossary(glossary_path: Path | str) -> str:
-    """从 Markdown 表格提取 原名 → 中文 紧凑对照。"""
+    """Extract a compact source → target glossary from CSV or Markdown."""
     path = Path(glossary_path)
     if not path.is_file():
         return ""
+    if path.suffix.lower() == ".csv":
+        return _compact_csv_glossary(path)
     lines_out: list[str] = []
     seen: set[str] = set()
     for raw in path.read_text(encoding="utf-8").splitlines():

@@ -1,7 +1,7 @@
 """Semantic resplit adapter inspired by VideoCaptioner Split.
 
 Only the prompt is borrowed (pipeline/prompts/split/sentence.md); all model
-access goes through model_client (Responses API). This adapter provides a
+access goes through model_client (Chat Completions / Responses API). This adapter provides a
 pragmatic integration: optional LLM <br> boundaries on flat text + proportional
 timing (when no word-level timestamps), or word-JSON alignment when provided.
 """
@@ -31,6 +31,7 @@ def resplit_with_vc(
     *,
     words_path: Path,
     model: Optional[str] = None,
+    api_mode: str = model_client.DEFAULT_API_MODE,
 ) -> tuple[SRTDocument, dict[str, Any]]:
     notes: list[str] = []
     words = json.loads(Path(words_path).read_text(encoding="utf-8"))
@@ -50,6 +51,7 @@ def resplit_with_vc(
             max_output_tokens=8192,
             temperature=0.2,
             timeout=180.0,
+            api_mode=api_mode,
         )
         text = (mr.text or "").strip()
         if "<br>" in text:
@@ -57,7 +59,7 @@ def resplit_with_vc(
         else:
             sentences = [flat]
             notes.append("LLM returned no <br>; single segment")
-        notes.append(f"split_llm status={mr.status}")
+        notes.append(f"split_llm api_mode={mr.api_mode} status={mr.status}")
     else:
         # fall back: pack words into ~18-word chunks
         sentences = []

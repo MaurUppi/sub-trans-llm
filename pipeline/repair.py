@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from model_client import Usage
+import model_client
 
 from pipeline.batch_client import call_one_batch
 from pipeline.config import DEFAULT_BATCH_SIZE, DEFAULT_MAX_OUTPUT_TOKENS
@@ -35,6 +36,7 @@ def repair_run_dir(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     sub_batch_size: int = 10,
+    api_mode: str = model_client.DEFAULT_API_MODE,
 ) -> TranslateResult:
     """
     对已有 run 目录只重跑失败批（或指定 batch_indices），合并进 parsed.json 并尝试生成 bilingual.srt。
@@ -42,6 +44,7 @@ def repair_run_dir(
     需要目录内已有: input.json, instructions.txt；建议有 meta.json / parsed.json。
     sub_batch_size: 整批 API 失败时，拆成更小块重试（绕过审核/截断），默认 10。
     """
+    api_mode = model_client.normalize_api_mode(api_mode)
     run_dir = Path(run_dir)
     srt_path = Path(srt_path)
     if not (run_dir / "input.json").is_file():
@@ -148,6 +151,7 @@ def repair_run_dir(
             max_retries=max_retries,
             retry_backoff_sec=retry_backoff_sec,
             batch_out=bout,
+            api_mode=api_mode,
         )
         usages.append(oc.usage)
         if oc.validate.ok and oc.validate.parsed:
@@ -192,6 +196,7 @@ def repair_run_dir(
                     max_retries=max(1, max_retries),
                     retry_backoff_sec=retry_backoff_sec,
                     batch_out=sub_out,
+                    api_mode=api_mode,
                 )
                 usages.append(soc.usage)
                 if soc.validate.ok and soc.validate.parsed:
@@ -282,6 +287,7 @@ def repair_run_dir(
         bilingual_srt=bilingual,
         raw_text="",
         elapsed_sec=elapsed,
+        api_mode=api_mode,
         input_map=full_input_map,
         instructions=instructions,
         cues=cues,

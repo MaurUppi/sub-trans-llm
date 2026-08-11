@@ -58,6 +58,7 @@ def _write_summary(out_dir: Path, results: list[translate.TranslateResult]) -> N
                 "reasoning_tokens": r.usage.reasoning_tokens,
                 "total_tokens": r.usage.total_tokens,
                 "elapsed_sec": round(r.elapsed_sec, 3),
+                "api_mode": r.api_mode,
             }
         )
     (out_dir / "summary.json").write_text(
@@ -89,8 +90,8 @@ def _write_summary(out_dir: Path, results: list[translate.TranslateResult]) -> N
     print(md)
 
 
-def cmd_ping(_: argparse.Namespace) -> int:
-    rows = model_client.smoke_test()
+def cmd_ping(args: argparse.Namespace) -> int:
+    rows = model_client.smoke_test(api_mode=args.api_mode)
     ok_n = sum(1 for r in rows if r.ok)
     for r in rows:
         mark = "OK" if r.ok else "FAIL"
@@ -133,6 +134,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         sub_batch_size=getattr(args, "sub_batch_size", 10),
         temperature=_sampling_from_args(args)[0],  # type: ignore[arg-type]
         top_p=_sampling_from_args(args)[1],  # type: ignore[arg-type]
+        api_mode=args.api_mode,
     )
     print(
         f"{'OK' if r.ok else 'FAIL'} repair {run_dir} "
@@ -169,6 +171,7 @@ def _maybe_preprocess(args: argparse.Namespace) -> Path:
         resplit=resplit,  # type: ignore[arg-type]
         words_path=Path(args.words) if getattr(args, "words", None) else None,
         model=getattr(args, "model", None) or getattr(args, "models", None),
+        api_mode=args.api_mode,
         work_dir=work,
     )
     # single-model string if models is list-like string
@@ -249,6 +252,7 @@ def _run_one(
         use_episode_summary=not getattr(args, "no_summary", False),
         temperature=temperature,  # type: ignore[arg-type]
         top_p=top_p,  # type: ignore[arg-type]
+        api_mode=args.api_mode,
     )
 
 
@@ -317,6 +321,7 @@ def cmd_preprocess(args: argparse.Namespace) -> int:
         resplit=resplit,  # type: ignore[arg-type]
         words_path=Path(args.words) if args.words else None,
         model=args.model,
+        api_mode=args.api_mode,
         work_dir=work,
     )
     pr = run_preprocess(args.srt, cfg)
@@ -334,10 +339,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     models = [args.model]
     out_dir = Path(args.out) if args.out else _default_out(f"run_{args.model}")
     if args.max_output_tokens is None:
-        args.max_output_tokens = 131072
+        # 50-cue bilingual production evidence peaks well below 8192 tokens;
+        # callers can still raise the ceiling explicitly for atypical inputs.
+        args.max_output_tokens = 8192
     if args.timeout is None:
-        # 分批后单批更快；总墙钟仍可能较长，默认 1200
-        args.timeout = 1200.0
+        args.timeout = 300.0
     # 全量默认 50/批；可用 --batch-jobs 并行送批
     if getattr(args, "batch_size", None) is None:
         args.batch_size = 50
@@ -348,7 +354,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"run: model={args.model} batch_size={args.batch_size} "
         f"batch_jobs={args.batch_jobs} "
         f"{_fmt_sampling(args)} "
-        f"preprocess={bool(getattr(args, 'preprocess', False))} out={out_dir}"
+        f"preprocess={bool(getattr(args, 'preprocess', False))} "
+        f"api_mode={args.api_mode} out={out_dir}"
     )
     code = _dispatch(models, args, out_dir)
     # re-load results for deliver? _dispatch doesn't return results.
@@ -459,7 +466,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="六模型字幕翻译 benchmark")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add_common(sp: argparse.ArgumentParser, *, need_srt: bool = True) -> None:
+    def add_api_mode(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--APImode",
+            "--api-mode",
+            dest="api_mode",
+            type=model_client.normalize_api_mode,
+            default=model_client.DEFAULT_API_MODE,
+            metavar="MODE",
+            help="API 模式：ChatCompletion（默认）或 Responses",
+        )
+
+    def add_common(
+        sp: argparse.ArgumentParser,
+        *,
+        need_srt: bool = True,
+        include_out: bool = True,
+    ) -> None:
+        add_api_mode(sp)
         if need_srt:
             sp.add_argument(
                 "--srt",
@@ -483,13 +507,19 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument(
             "--glossary",
             default=None,
-            help="可选术语表路径；默认不注入 Glossary",
+            help=(
+                "可选术语表路径；推荐 CSV 表头 source,target,note，兼容 Markdown "
+                "表格；默认不注入 Glossary"
+            ),
         )
         sp.add_argument("--max-cues", type=int, default=None)
         sp.add_argument("--cue-offset", type=int, default=0)
         sp.add_argument("--max-output-tokens", type=int, default=None)
         sp.add_argument("--timeout", type=float, default=None)
-        sp.add_argument("--out", default=None, help="输出目录")
+        if include_out:
+            sp.add_argument("--out", default=None, help="输出目录")
+        else:
+            sp.set_defaults(out=None)
         sp.add_argument(
             "--jobs",
             type=int,
@@ -546,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     sp = sub.add_parser("ping", help="最少 token 连通六模型")
+    add_api_mode(sp)
     sp.set_defaults(func=cmd_ping)
 
     sp = sub.add_parser("selfcheck", help="离线自检 parse/validate/srt")
@@ -625,8 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_preprocess)
 
-    sp = sub.add_parser("run", help="单模型运行（默认可全量）")
-    add_common(sp)
+    sp = sub.add_parser(
+        "run",
+        help="单模型运行（默认可全量）",
+        allow_abbrev=False,
+    )
+    add_common(sp, include_out=False)
     add_preprocess_flags(sp)
     sp.add_argument("--model", required=True)
     sp.add_argument(
@@ -637,7 +672,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--output",
         default=None,
-        help="最终双语 SRT 路径（默认：与源同目录 {stem}_zh.srt）",
+        help=(
+            "最终双语 SRT 文件路径；默认写到 --srt 同目录的 "
+            "{stem}_zh.srt"
+        ),
     )
     sp.set_defaults(func=cmd_run)
 

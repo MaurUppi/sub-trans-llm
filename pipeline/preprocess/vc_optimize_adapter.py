@@ -17,7 +17,10 @@ _PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "optimize" / "subtit
 
 
 def optimize_document(
-    document: SRTDocument, *, model: Optional[str] = None
+    document: SRTDocument,
+    *,
+    model: Optional[str] = None,
+    api_mode: str = model_client.DEFAULT_API_MODE,
 ) -> tuple[SRTDocument, dict[str, Any]]:
     if not model:
         raise ValueError("optimize requires --model")
@@ -42,6 +45,7 @@ def optimize_document(
         max_output_tokens=8192,
         temperature=0.2,
         timeout=180.0,
+        api_mode=api_mode,
     )
     raw = (mr.text or "").strip()
     # strip fence
@@ -79,4 +83,8 @@ def optimize_document(
         detected_language=document.detected_language,
         encoding=document.encoding,
     )
-    return out, {"notes": [f"optimize model={model} status={mr.status}"]}
+    return out, {
+        "notes": [
+            f"optimize model={model} api_mode={mr.api_mode} status={mr.status}"
+        ]
+    }

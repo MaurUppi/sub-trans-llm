@@ -70,6 +70,7 @@ def run_once(
     summary_max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
     summary_timeout: float = 180.0,
     episode_summary_override: Optional[str] = None,
+    api_mode: str = model_client.DEFAULT_API_MODE,
 ) -> TranslateResult:
     """
     整集（或切片）翻译：可选通读摘要 + 按 batch_size 分批送模型，本地合并。
@@ -79,6 +80,7 @@ def run_once(
     - use_episode_summary: 先全量通读生成摘要，再注入各批 instructions
     - 双语 SRT：译文用模型 tr，原文用本地 Cue.text（按全局 id 对齐）
     """
+    api_mode = model_client.normalize_api_mode(api_mode)
     srt_path = Path(srt_path)
     out_path = Path(out_dir) if out_dir else None
 
@@ -119,6 +121,7 @@ def run_once(
             max_retries=max_retries,
             retry_backoff_sec=retry_backoff_sec,
             out_dir=summary_dir,
+            api_mode=api_mode,
         )
         if sum_err:
             summary_notes.append(f"episode_summary degraded: {sum_err}")
@@ -146,7 +149,8 @@ def run_once(
         f"🌐 分批翻译 model={model} cues={len(cues)}/{len(all_cues)} "
         f"batches={n_batches}×{batch_size if batch_size > 0 else 'all'} "
         f"batch_jobs={jobs} max_out={max_output_tokens} timeout={timeout}s "
-        f"retries={max_retries} summary={'yes' if episode_summary else 'no'}"
+        f"retries={max_retries} summary={'yes' if episode_summary else 'no'} "
+        f"api_mode={api_mode}"
     )
     log(
         f"   full_input ≈ {len(full_input_json)} chars, "
@@ -166,6 +170,7 @@ def run_once(
                     "n_batches": n_batches,
                     "use_episode_summary": use_episode_summary,
                     "episode_summary_chars": len(episode_summary),
+                    "api_mode": api_mode,
                     "batches": [
                         {
                             "index": i,
@@ -198,6 +203,7 @@ def run_once(
             max_retries=max_retries,
             retry_backoff_sec=retry_backoff_sec,
             batch_out=bout,
+            api_mode=api_mode,
         )
 
     def _run_many(indices: list[int], *, parallel: bool, label: str) -> dict[int, BatchOutcome]:
@@ -389,6 +395,7 @@ def run_once(
         bilingual_srt=bilingual,
         raw_text=raw_text,
         elapsed_sec=elapsed,
+        api_mode=api_mode,
         input_map=full_input_map,
         instructions=instructions,
         cues=cues,

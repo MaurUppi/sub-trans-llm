@@ -91,6 +91,8 @@ def test_inspection_rescue_masks_then_restores_frozen_glossary_term(
     assert len(calls) == 1
     assert calls[0]["temperature"] == 0.3
     assert calls[0]["top_p"] is model_client.OMIT
+    assert calls[0]["api_mode"] == "responses"
+    assert result.api_mode == "responses"
     assert "我很了解共产党！" in result.bilingual_srt
     assert "I know the Communists well!" in result.bilingual_srt
     assert result.validate.parsed["0"] == {

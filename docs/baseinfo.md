@@ -35,6 +35,147 @@ OpenAI Responses接口兼容: "https://help.aliyun.com/zh/model-studio/compatibi
 > 本项目 `.env` 用的是旧的 `https://dashscope.aliyuncs.com/compatible-mode/v1`，
 > 六模型实测仍可用，暂不改动；若将来报鉴权/路由错误，先查这一条。
 
+# Chat Completions API 官方规范复核（检索日期：2026-08-11）
+
+## Answer
+
+本项目可以在同一个 OpenAI Python SDK 客户端上为阿里云百炼与火山引擎方舟实现
+Chat Completions：两家都要求把厂商 `base_url` 和 API Key 传给 `OpenAI(...)`，再调用
+`client.chat.completions.create(model=..., messages=...)`。HTTP 方式均为
+`POST <base_url>/chat/completions`，并使用 `Authorization: Bearer <API_KEY>` 与
+`Content-Type: application/json`。但 Chat 与 Responses **不是只换一个方法名**：输入、输出
+token 上限字段、文本提取路径、usage 字段和流式事件都不同，必须在客户端内部做显式映射。
+[百炼 Chat API 参考](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、
+[百炼 OpenAI Chat 兼容指南](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope)、
+[方舟 Chat API 参考](https://www.volcengine.com/docs/82379/1494384)、
+[方舟 OpenAI SDK 兼容指南](https://www.volcengine.com/docs/82379/1330626)。
+
+## Evidence
+
+### 服务地址、鉴权与 OpenAI SDK
+
+| 厂商 | OpenAI SDK `base_url` | HTTP Chat endpoint | 鉴权 | 官方 SDK 调用 |
+|---|---|---|---|---|
+| 火山方舟（北京） | `https://ark.cn-beijing.volces.com/api/v3` | `POST https://ark.cn-beijing.volces.com/api/v3/chat/completions` | `Authorization: Bearer $ARK_API_KEY` | `client.chat.completions.create(model=..., messages=[...])` |
+| 阿里云百炼（北京，推荐新域名） | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` | `POST https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions` | `Authorization: Bearer $DASHSCOPE_API_KEY` | `client.chat.completions.create(model=..., messages=[...])` |
+
+方舟的 endpoint、Bearer header 和 `model`/`messages` 请求示例见
+[对话（Chat）API](https://www.volcengine.com/docs/82379/1494384)；`OpenAI(base_url=..., api_key=...)`
+示例见[兼容 OpenAI SDK](https://www.volcengine.com/docs/82379/1330626)。百炼的地域 endpoint、
+Bearer header、非流式/流式 cURL 与 Python SDK 示例见
+[OpenAI Chat 接口兼容](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope)。
+百炼官方说明北京与新加坡的旧 `dashscope` 域名目前仍可用，但建议迁移到业务空间专属域名；
+因此现有 `.env` 不是当场失效，只是后续应单独安排域名迁移。
+
+最小非流式调用形态如下；密钥仍只从环境变量读取：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key=api_key, base_url=base_url)
+completion = client.chat.completions.create(
+    model=model,
+    messages=[
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": prompt},
+    ],
+)
+text = completion.choices[0].message.content
+```
+
+### 请求体、返回结构与流式输出
+
+- `model` 与 `messages` 是两家 Chat 请求的核心字段；`messages` 按对话顺序排列，系统指令应作为
+  `role="system"` 消息，而不是 Responses 的独立 `instructions` 字段。
+  [百炼 Chat API 参考](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、
+  [方舟 Chat API 参考](https://www.volcengine.com/docs/82379/1494384)。
+- 非流式文本都从 `choices[0].message.content` 读取；`finish_reason` 至少需要处理 `stop` 与
+  `length`，方舟还明确列出 `content_filter` 与 `tool_calls`。token 用量字段是
+  `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens`，并可带缓存或
+  reasoning 明细。
+  [百炼返回对象](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、
+  [方舟返回对象](https://www.volcengine.com/docs/82379/1494384)。
+- 设置 `stream=True` 后，两家 Chat 都按 chunk 返回，正文增量位于
+  `choices[].delta.content`。百炼以 `stream_options={"include_usage": True}` 让**最后一个**
+  chunk 携带用量；方舟的 `include_usage=True` 会在 `data: [DONE]` 前追加一个
+  `choices=[]` 的 usage chunk，另有非 OpenAI 标准的 `chunk_include_usage=True` 可让每个
+  chunk 带累计用量。不能把方舟的逐块 usage 行为假设成百炼也支持。
+  [百炼流式参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、
+  [方舟流式参数](https://www.volcengine.com/docs/82379/1494384)。
+
+### Chat 与 Responses 的实现映射
+
+| 语义 | Chat Completions | Responses API |
+|---|---|---|
+| endpoint | `/chat/completions` | `/responses` |
+| 输入 | `messages=[{"role": ..., "content": ...}]` | `input`（字符串或消息数组）+ 可选 `instructions` |
+| 输出上限 | 新实现优先 `max_completion_tokens`；百炼已把 `max_tokens` 标为即将废弃，方舟同时列出两者 | `max_output_tokens` |
+| 非流式文本 | `choices[0].message.content` | SDK 便捷属性 `output_text`，原始结构在 `output[]` |
+| 完成/截断 | `choices[0].finish_reason`（如 `stop`/`length`） | 顶层 `status` 与 `incomplete_details` |
+| usage | `prompt_tokens` / `completion_tokens` / `total_tokens` | `input_tokens` / `output_tokens` / `total_tokens` |
+| 流式文本 | `choices[].delta.content` | `response.output_text.delta` 事件的 `delta` |
+| 多轮上下文 | 调用方重传完整 `messages` | 可用 `previous_response_id` 由服务端关联 |
+
+以上迁移关系由百炼官方迁移指南直接给出；该指南同时说明 Responses 提供内置工具、更灵活的
+输入与 `previous_response_id` 上下文管理。
+[百炼 Chat → Responses 迁移指南](https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api)。
+方舟则分别公开 Chat 与 Responses API：Responses 的 endpoint 为
+`POST https://ark.cn-beijing.volces.com/api/v3/responses`，请求使用 `input`，返回顶层
+`status`、`output[]` 与 `usage.input_tokens/output_tokens`。
+[方舟创建 Response](https://www.volcengine.com/docs/82379/1569618)。
+
+### 关闭思考不能跨模式照搬参数
+
+| 厂商 | Chat Completions | Responses API |
+|---|---|---|
+| 方舟 | `extra_body={"thinking": {"type": "disabled"}}` | `extra_body={"thinking": {"type": "disabled"}}` |
+| 百炼 | 对当前 Qwen 3.7 目标模型使用 `extra_body={"enable_thinking": False}` | 使用 `reasoning={"effort": "none"}`；其优先级高于将逐步废弃的 `enable_thinking` |
+
+方舟官方 OpenAI SDK 示例明确通过 `extra_body` 传 `thinking.type=disabled`。
+[方舟 OpenAI SDK 兼容指南](https://www.volcengine.com/docs/82379/1330626)。百炼 Chat 参数表明确
+`enable_thinking` 适用于 Qwen 3.7 且在 Python SDK 中须放入 `extra_body`；Responses 参数表则
+推荐 `reasoning.effort`，并说明只处理其文档明确列出的参数。
+[百炼 Chat 参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、
+[百炼 Responses 参数与兼容限制](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses)。
+
+### Responses 支持范围不是 Chat 支持范围的同义词
+
+- 百炼 Chat 文档覆盖 Qwen 大语言模型等更广的模型族；截至检索日，其 Responses 兼容指南
+  另行列出支持模型。当前项目的 `qwen3.7-plus`、`qwen3.7-max`、`qwen3.8-max` 都在该
+  Responses 列表中，但不能据此推断所有 Chat 模型都支持 Responses。
+  [百炼 Responses 支持模型](https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api)。
+- 方舟官方 API 目录同时提供 Chat 与 Responses endpoint，但本次查看的通用 API 页面没有承诺
+  “每个 Chat 模型都支持全部 Responses 参数”。切换模式仍需按具体模型/版本核验能力，尤其是
+  `thinking`、结构化输出与工具调用。
+  [方舟 Chat API](https://www.volcengine.com/docs/82379/1494384)、
+  [方舟 Responses API](https://www.volcengine.com/docs/82379/1569618)。
+
+## Limitations and unknowns
+
+1. 本次只以 2026-08-11 可见的阿里云百炼与火山引擎方舟官方文档为证据，没有把 OpenAI
+   原站行为或第三方 SDK 行为外推给云厂商兼容接口；兼容接口以后可能继续调整字段和默认值。
+2. 官方通用 API 参考不能替代具体模型卡。每个模型/快照对 `max_completion_tokens`、
+   `reasoning_effort`、结构化输出、工具调用的支持仍可能不同；未知能力必须在 smoketest 中
+   实测，不能用另一模型的成功结果代替。
+3. Chat 与 Responses 的 token 计数口径和思考预算并非所有模型都完全一致。实现可以归一化
+   元数据字段名，但不应声称两种 API 的计费或有效采样过程逐 token 等价。
+4. 百炼 Responses 明确规定未列出的 OpenAI 参数会被忽略；“请求成功”不能单独证明某个兼容
+   参数生效。该限制不能反向推断到 Chat，Chat 应以它自己的参数表为准。
+
+## Decision impact
+
+- `--APImode` 的默认值可设为 Chat Completions，但内部必须为两种 API 保留独立的请求构造与
+  响应解析分支；只在分支外暴露统一的文本、usage、完成状态和原始响应接口。
+- 将系统指令映射为 Chat 的首个 `system` message，将翻译输入映射为后续 `user` message；
+  Responses 分支继续使用 `instructions` + `input`。
+- Chat 的输出预算应使用 `max_completion_tokens`，Responses 继续使用
+  `max_output_tokens`；不要把同一个关键字原样发送给两个 endpoint。
+- smoketest 必须至少断言：正文非空、未因 `length` 截断、思考已关闭、usage 可解析；如测流式，
+  还要分别覆盖 Chat chunk 与 Responses event 的拼接路径。
+- 2026-08-05 下文“优先 Responses / 维持现状”的结论是当时结构化输出实验的历史建议；当前
+  2026-08-11 任务已将产品默认改为 Chat Completions。旧实验数据仍可用于解释能力差异，但不再
+  定义默认 API 模式。
+
 ## .env 字段说明
 ```
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # 不要带 /responses
@@ -169,17 +310,18 @@ Stage A 的 rules 引擎只管**英文原文**的行长与切分，中文译文�
 
 ## 关闭思考
 ```
-Ark:    extra_body={"thinking": {"type": "disabled"}}
-Aliyun: reasoning={"effort": "none"}   # 优先于 enable_thinking
+Ark Chat / Responses: extra_body={"thinking": {"type": "disabled"}}
+Aliyun Chat:           extra_body={"enable_thinking": False}
+Aliyun Responses:      reasoning={"effort": "none"}  # 优先于 enable_thinking
 ```
 
 # 注意：
 - 代码语言： Python
 - 统一使用: OpenAI SDK
 - 思考开关: 必须禁用
-- 优先选择: Responses API
-- top_p=1.0
-- temperature=1.0
+- 默认 API 模式：Chat Completions（2026-08-11 起）；Responses 作为显式兼容模式保留
+- `top_p`：默认 OMIT，不写入请求；仅显式指定时发送
+- `temperature`：默认 OMIT，不写入请求；仅显式指定时发送
 
 # max_output_tokens / max_tokens 调查结论（2026-08-05 实测）
 
@@ -341,7 +483,10 @@ qwen3.7-plus 在 `strict=True` 且 schema 要求 `{src, tr}` 的情况下，直�
    4 个静默无效」的参数，六模型就不再走同一条路径，测出的格式合规率差异
    将不再是模型能力差异。做对比实验，一致性优先于局部最优。
 
-## 对本项目的直接结论
+## 对本项目的直接结论（2026-08-05 历史实验结论）
+
+> 本节解释当时为何在结构化输出实验中建议维持 Responses 路径；它已被上文
+> 2026-08-11 的 Chat Completions 默认模式决策取代，不再定义当前默认 API 模式。
 
 1. **不存在「一套写法通吃六模型」**。要上 json_schema，必须按 provider 分叉：
    Ark 走 Responses `text.format`，阿里云走 Chat `response_format`。
@@ -425,4 +570,3 @@ qwen3.7-plus 在 `strict=True` 且 schema 要求 `{src, tr}` 的情况下，直�
 1. **输入侧**：六模型上下文远大于 ~20k，**可以**整集塞进一次请求。
 2. **`max_output_tokens=32768` 双语一次返回**：**不建议视为可行**。双语输出贴近/超过 32k，截断风险高；纯中文也偏紧。
 3. **更合理分批**：按 cue **30–50 条/批**（历史经验 30）；双语若仍用 32k 上限，技术上可到 100–150，但质量与漏译风险上升。输出格式尽量「只回译文行 + 序号/时间码」，由本地拼 SRT。
-

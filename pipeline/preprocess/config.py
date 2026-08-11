@@ -19,6 +19,7 @@ class PreprocessConfig:
     resplit: ForceMode = "auto"
     words_path: Optional[Path] = None
     model: Optional[str] = None  # for VC LLM steps
+    api_mode: str = "chat_completions"
     work_dir: Optional[Path] = None
     # rules thresholds
     overlap_min_ms: float = 50.0

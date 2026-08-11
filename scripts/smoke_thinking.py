@@ -65,7 +65,11 @@ def check(alias: str, *, disable_thinking: bool = True) -> dict[str, Any]:
     try:
         if disable_thinking:
             resp = model_client.call(
-                alias, PROBE, max_output_tokens=MAX_OUT, timeout=180.0
+                alias,
+                PROBE,
+                max_output_tokens=MAX_OUT,
+                timeout=180.0,
+                api_mode=model_client.API_MODE_RESPONSES,
             ).raw
         else:
             resp = _call_control(alias)

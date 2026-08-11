@@ -1,5 +1,5 @@
 """
-统一模型调用模块（OpenAI SDK + Responses API）
+统一模型调用模块（OpenAI SDK + Chat Completions / Responses API）
 
 配置全部来自项目根目录 `.env`（见 `.env.example`），脚本内不硬编码密钥。
 
@@ -10,7 +10,7 @@
 约定：
   - 强制关闭思考
   - temperature / top_p：**默认不传**；只有显式给值才写进请求体
-  - Responses API
+  - 默认 Chat Completions API；可显式切换 Responses API
   - max_output_tokens 可选
 
 用法::
@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +49,22 @@ class _OmitType:
 
 OMIT = _OmitType()
 SamplingArg = Union[float, None, _OmitType]
+
+API_MODE_CHAT_COMPLETIONS = "chat_completions"
+API_MODE_RESPONSES = "responses"
+DEFAULT_API_MODE = API_MODE_CHAT_COMPLETIONS
+
+
+def normalize_api_mode(value: str) -> str:
+    """Normalize user-facing API mode spellings to stable metadata values."""
+    key = "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+    if key in {"chat", "chatcompletion", "chatcompletions", "chatcompletionapi"}:
+        return API_MODE_CHAT_COMPLETIONS
+    if key in {"response", "responses", "responseapi", "responsesapi"}:
+        return API_MODE_RESPONSES
+    raise ValueError(
+        f"未知 API 模式 {value!r}；可用 ChatCompletion 或 Responses"
+    )
 
 # ---------------------------------------------------------------------------
 # 加载 .env（不依赖系统全局环境，优先项目根目录）
@@ -226,11 +243,24 @@ class Usage:
     def from_response(cls, usage: Any) -> "Usage":
         if usage is None:
             return cls()
-        data = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
-        details = data.get("output_tokens_details") or {}
+        if hasattr(usage, "model_dump"):
+            data = usage.model_dump()
+        elif isinstance(usage, dict):
+            data = dict(usage)
+        else:
+            data = vars(usage)
+        details = (
+            data.get("output_tokens_details")
+            or data.get("completion_tokens_details")
+            or {}
+        )
         return cls(
-            input_tokens=int(data.get("input_tokens") or 0),
-            output_tokens=int(data.get("output_tokens") or 0),
+            input_tokens=int(
+                data.get("input_tokens") or data.get("prompt_tokens") or 0
+            ),
+            output_tokens=int(
+                data.get("output_tokens") or data.get("completion_tokens") or 0
+            ),
             reasoning_tokens=int(details.get("reasoning_tokens") or 0),
             total_tokens=int(data.get("total_tokens") or 0),
             raw=data,
@@ -239,7 +269,7 @@ class Usage:
 
 @dataclass
 class ModelResult:
-    """一次 Responses 调用的结果。"""
+    """一次 Chat Completions 或 Responses 调用的统一结果。"""
 
     text: str
     model: str
@@ -247,6 +277,7 @@ class ModelResult:
     status: str
     usage: Usage
     max_output_tokens: Optional[int]
+    api_mode: str = DEFAULT_API_MODE
     incomplete_reason: Optional[str] = None
     raw: Any = None
 
@@ -282,6 +313,38 @@ def _extract_text(resp: Any) -> str:
     return "".join(parts)
 
 
+def _extract_chat_text(resp: Any) -> str:
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for item in content or []:
+        if isinstance(item, dict):
+            text = item.get("text")
+        else:
+            text = getattr(item, "text", None)
+        if text:
+            parts.append(str(text))
+    return "".join(parts)
+
+
+def _chat_messages(
+    input: str | list[dict[str, Any]], instructions: Optional[str]
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    if instructions is not None:
+        messages.append({"role": "system", "content": instructions})
+    if isinstance(input, str):
+        messages.append({"role": "user", "content": input})
+    else:
+        messages.extend(dict(item) for item in input)
+    return messages
+
+
 def _build_client(cfg: dict[str, Any], timeout: float) -> OpenAI:
     api_key = _require_env(cfg["api_key_env"])
     return OpenAI(api_key=api_key, base_url=cfg["base_url"], timeout=timeout)
@@ -297,9 +360,10 @@ def call(
     max_output_tokens: Optional[int] = None,
     timeout: float = 120.0,
     extra: Optional[dict[str, Any]] = None,
+    api_mode: str = DEFAULT_API_MODE,
 ) -> ModelResult:
     """
-    调用指定模型的 Responses API。
+    调用指定模型；默认 Chat Completions，可切换 Responses。
 
     Parameters
     ----------
@@ -314,10 +378,12 @@ def call(
         均省略字段并使用服务端默认值。旧的 ``DEFAULT_TEMPERATURE`` /
         ``DEFAULT_TOP_P`` 环境变量不再参与解析。
     max_output_tokens :
-        输出上限（含 reasoning tokens）。
+        输出上限（含 reasoning tokens）。Chat 映射为 ``max_completion_tokens``，
+        Responses 使用 ``max_output_tokens``。
         ``None`` 时先读 ``DEFAULT_MAX_OUTPUT_TOKENS``，仍为空则不传（服务端默认）。
         阿里云若传入，最小值为 16。
     """
+    api_mode = normalize_api_mode(api_mode)
     cfg = resolve_model(model)
     client = _build_client(cfg, timeout=timeout)
 
@@ -326,50 +392,74 @@ def call(
     if max_output_tokens is None:
         max_output_tokens = _env_int_optional("DEFAULT_MAX_OUTPUT_TOKENS")
 
-    kwargs: dict[str, Any] = {
-        "model": cfg["model"],
-        "input": input,
-    }
+    kwargs: dict[str, Any] = {"model": cfg["model"]}
+    if api_mode == API_MODE_CHAT_COMPLETIONS:
+        kwargs["messages"] = _chat_messages(input, instructions)
+    else:
+        kwargs["input"] = input
     # Only send sampling params when resolved; None = provider/model default
     if temperature is not None:
         kwargs["temperature"] = temperature
     if top_p is not None:
         kwargs["top_p"] = top_p
-    if instructions is not None:
+    if instructions is not None and api_mode == API_MODE_RESPONSES:
         kwargs["instructions"] = instructions
 
     if max_output_tokens is not None:
         mot = int(max_output_tokens)
-        if cfg["provider"] == "ali" and mot < ALI_MIN_MAX_OUTPUT_TOKENS:
+        if (
+            api_mode == API_MODE_RESPONSES
+            and cfg["provider"] == "ali"
+            and mot < ALI_MIN_MAX_OUTPUT_TOKENS
+        ):
             raise ValueError(
                 f"阿里云 max_output_tokens 最小为 {ALI_MIN_MAX_OUTPUT_TOKENS}，"
                 f"收到 {mot}"
             )
-        kwargs["max_output_tokens"] = mot
+        kwargs[
+            "max_completion_tokens"
+            if api_mode == API_MODE_CHAT_COMPLETIONS
+            else "max_output_tokens"
+        ] = mot
 
     extra_body: dict[str, Any] = dict(extra or {})
     if cfg["thinking"] == "ark":
         extra_body.setdefault("thinking", {"type": "disabled"})
     elif cfg["thinking"] == "ali":
-        kwargs["reasoning"] = {"effort": "none"}
+        if api_mode == API_MODE_CHAT_COMPLETIONS:
+            extra_body.setdefault("enable_thinking", False)
+        else:
+            kwargs["reasoning"] = {"effort": "none"}
 
     if extra_body:
         kwargs["extra_body"] = extra_body
 
-    resp = client.responses.create(**kwargs)
-
-    incomplete = getattr(resp, "incomplete_details", None)
-    incomplete_reason = None
-    if incomplete is not None:
-        incomplete_reason = getattr(incomplete, "reason", None) or str(incomplete)
+    if api_mode == API_MODE_CHAT_COMPLETIONS:
+        resp = client.chat.completions.create(**kwargs)
+        choices = getattr(resp, "choices", None) or []
+        finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+        incomplete_reason = finish_reason if finish_reason not in (None, "stop") else None
+        status = "completed" if incomplete_reason is None else "incomplete"
+        text = _extract_chat_text(resp)
+        returned_max_tokens = max_output_tokens
+    else:
+        resp = client.responses.create(**kwargs)
+        incomplete = getattr(resp, "incomplete_details", None)
+        incomplete_reason = None
+        if incomplete is not None:
+            incomplete_reason = getattr(incomplete, "reason", None) or str(incomplete)
+        status = getattr(resp, "status", "") or ""
+        text = _extract_text(resp)
+        returned_max_tokens = getattr(resp, "max_output_tokens", None)
 
     return ModelResult(
-        text=_extract_text(resp),
-        model=cfg["model"],
+        text=text,
+        model=getattr(resp, "model", None) or cfg["model"],
         alias=cfg.get("alias", model),
-        status=getattr(resp, "status", "") or "",
+        status=status,
         usage=Usage.from_response(getattr(resp, "usage", None)),
-        max_output_tokens=getattr(resp, "max_output_tokens", None),
+        max_output_tokens=returned_max_tokens,
+        api_mode=api_mode,
         incomplete_reason=incomplete_reason,
         raw=resp,
     )
@@ -380,12 +470,18 @@ def smoke_test(
     *,
     max_output_tokens: int = 16,
     prompt: str = "Reply with exactly: OK",
+    api_mode: str = DEFAULT_API_MODE,
 ) -> list[ModelResult]:
     """用最少 token 验证模型可连通。"""
     results: list[ModelResult] = []
     for name in models or list_models():
         try:
-            r = call(name, prompt, max_output_tokens=max_output_tokens)
+            r = call(
+                name,
+                prompt,
+                max_output_tokens=max_output_tokens,
+                api_mode=api_mode,
+            )
             results.append(r)
         except Exception as e:  # noqa: BLE001
             try:
@@ -400,17 +496,43 @@ def smoke_test(
                     status=f"error: {type(e).__name__}: {e}",
                     usage=Usage(),
                     max_output_tokens=max_output_tokens,
+                    api_mode=normalize_api_mode(api_mode),
                 )
             )
     return results
 
 
-if __name__ == "__main__":
-    import sys
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="六模型 API 连通性烟测")
+    parser.add_argument(
+        "--APImode",
+        "--api-mode",
+        dest="api_mode",
+        type=normalize_api_mode,
+        default=DEFAULT_API_MODE,
+        metavar="MODE",
+        help="API 模式：ChatCompletion（默认）或 Responses",
+    )
+    parser.add_argument("--models", default="all", help="逗号分隔 alias，或 all")
+    parser.add_argument("--max-output-tokens", type=int, default=16)
+    parser.add_argument("--prompt", default="Reply with exactly: OK")
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    models = None
+    if args.models.strip().lower() not in {"all", "*"}:
+        models = [name.strip() for name in args.models.split(",") if name.strip()]
 
     print(f"配置文件: {_ENV_PATH} (exists={_ENV_PATH.is_file()})")
-    print("模型调用烟测（最少 token）\n")
-    rows = smoke_test()
+    print(f"模型调用烟测 api_mode={args.api_mode}（最少 token）\n")
+    rows = smoke_test(
+        models,
+        max_output_tokens=args.max_output_tokens,
+        prompt=args.prompt,
+        api_mode=args.api_mode,
+    )
     ok_n = 0
     for r in rows:
         mark = "OK" if r.ok else "FAIL"
@@ -427,4 +549,10 @@ if __name__ == "__main__":
         if r.incomplete_reason:
             print(f"       incomplete_reason={r.incomplete_reason}")
     print(f"\n通过 {ok_n}/{len(rows)}")
-    sys.exit(0 if ok_n == len(rows) else 1)
+    return 0 if ok_n == len(rows) else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

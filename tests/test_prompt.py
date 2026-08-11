@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pipeline.prompt import build_instructions, build_summary_input, compact_glossary
 from pipeline.models import Cue
 from pipeline.srt_io import parse_srt, slice_cues
@@ -12,6 +14,29 @@ def test_compact_glossary(glossary_path=None):
     text = compact_glossary(GLOSSARY)
     assert "Daniel Larcher" in text or "达尼埃尔" in text
     assert " = " in text
+
+
+def test_compact_glossary_supports_csv_source_target_note(tmp_path: Path) -> None:
+    glossary = tmp_path / "glossary.csv"
+    glossary.write_text(
+        "\ufeffsource,target,note\n"
+        'Daniel Larcher,达尼埃尔·拉尔谢,"市长, 大夫"\n'
+        "Villeneuve,维勒纳夫,故事主要发生地\n",
+        encoding="utf-8",
+    )
+
+    text = compact_glossary(glossary)
+
+    assert "Daniel Larcher = 达尼埃尔·拉尔谢（市长, 大夫）" in text
+    assert "Villeneuve = 维勒纳夫（故事主要发生地）" in text
+
+
+def test_compact_glossary_rejects_csv_without_required_header(tmp_path: Path) -> None:
+    glossary = tmp_path / "glossary.csv"
+    glossary.write_text("english,chinese\nVilleneuve,维勒纳夫\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source,target,note"):
+        compact_glossary(glossary)
 
 
 def test_build_instructions_replaces_vars():

@@ -64,8 +64,10 @@ def rescue_inspection_run_dir(
     temperature: object = model_client.OMIT,
     top_p: object = model_client.OMIT,
     call_fn: Callable[..., BatchOutcome] | None = None,
+    api_mode: str = model_client.API_MODE_RESPONSES,
 ) -> TranslateResult:
     """Fill only inspection-blocked glossary cues via a recorded placeholder."""
+    api_mode = model_client.normalize_api_mode(api_mode)
     run_dir = Path(run_dir)
     srt_path = Path(srt_path)
     full_input: dict[str, str] = json.loads(
@@ -130,6 +132,7 @@ def rescue_inspection_run_dir(
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "model_alias": model,
+        "api_mode": api_mode,
         "sampling": meta.get("sampling") or {},
         "missing_cue_ids": missing,
         "base_instructions_sha256": hashlib.sha256(
@@ -158,6 +161,7 @@ def rescue_inspection_run_dir(
         max_retries=2,
         retry_backoff_sec=3.0,
         batch_out=pass_dir / "call",
+        api_mode=api_mode,
     )
     if not outcome.validate.ok or not outcome.validate.parsed:
         manifest.update(
@@ -253,6 +257,7 @@ def rescue_inspection_run_dir(
             else ""
         ),
         elapsed_sec=float(meta.get("elapsed_sec") or 0),
+        api_mode=api_mode,
         input_map=full_input,
         instructions=base_instructions,
         cues=cues,

@@ -28,6 +28,7 @@ def call_one_batch(
     max_retries: int,
     retry_backoff_sec: float,
     batch_out: Optional[Path],
+    api_mode: str = model_client.DEFAULT_API_MODE,
 ) -> BatchOutcome:
     """对一批 cue 调用模型（JSON 键使用全局 id）。"""
     input_json, input_map = build_input_json(batch_cues)
@@ -59,6 +60,7 @@ def call_one_batch(
                 top_p=top_p,
                 max_output_tokens=max_output_tokens,
                 timeout=timeout,
+                api_mode=api_mode,
             )
             raw_text = mr.text or ""
             status = mr.status
