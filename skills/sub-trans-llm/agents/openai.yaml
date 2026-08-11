@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sub-trans-llm"
+  short_description: "运行多语言字幕翻译、前处理、失败修复与 TQA v2 质量评测流程"
+  default_prompt: "使用 $sub-trans-llm 检查当前环境，并为这份 SRT 选择和执行合适的翻译或 TQA 工作流。"

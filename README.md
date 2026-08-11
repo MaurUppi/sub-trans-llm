@@ -25,6 +25,7 @@ TQA.md                     # TQA v2 用户指南与当前支持边界
 pipeline/                  # 翻译、校验、repair、前处理与 TQA 实现
 pipeline/prompts/          # 公开运行时 prompt
 pipeline/tqa/              # TQA v2 Framework、Schema、默认 Profile 与流水线
+skills/sub-trans-llm/      # 可由 Agent Skills CLI 安装的操作 Skill
 scripts/                   # 手动 API 兼容性 smoke 工具
 tests/                     # 自包含 pytest 回归测试
 ```
@@ -43,6 +44,54 @@ cp .env.example .env
 ```
 
 `.env` 中的 `DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P` 已废弃，不影响调用。`DEFAULT_MAX_OUTPUT_TOKENS` 只作为直连 `model_client.call` 的可选上限来源。
+
+## Agent Skill
+
+仓库发布了标准的 [`sub-trans-llm` Skill](skills/sub-trans-llm/SKILL.md)，供 Claude Code、Codex、Grok Build、Hermes Agent 等 CLI Agent 定位并操作本项目。Skill 与 Python 应用是两个层次：安装 Skill 不会安装仓库代码、Python 依赖或 API 凭据；用户仍可完全绕过 Agent，直接执行本文档中的 `python main.py ...` 命令。
+
+### 方式一：通过 npx 安装（推荐）
+
+让 Agent Skills CLI 自动检测本机 Agent，并交互选择安装目标：
+
+```bash
+npx skills add MaurUppi/sub-trans-llm \
+  --skill sub-trans-llm \
+  --global
+```
+
+也可以明确安装到四个受支持的目标：
+
+```bash
+npx skills add MaurUppi/sub-trans-llm \
+  --skill sub-trans-llm \
+  --global \
+  --agent claude-code codex grok hermes-agent
+```
+
+默认符号链接模式以 `~/.agents/skills/sub-trans-llm` 为全局 canonical 目录。Codex 直接读取该目录；Claude Code、Grok Build 和 Hermes Agent 分别通过 `~/.claude/skills/`、`~/.grok/skills/`、`~/.hermes/skills/` 下的符号链接使用同一份 Skill。无需、也不建议额外创建 `~/.codex/skills/sub-trans-llm` 链接。
+
+### 方式二：git clone 后手动安装
+
+clone 仓库并按“环境准备”安装 Python 应用后，将仓库内 Skill 作为唯一源码链接到 canonical 目录：
+
+```bash
+git clone https://github.com/MaurUppi/sub-trans-llm.git "/path/to/sub-trans-llm"
+cd "/path/to/sub-trans-llm"
+
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/sub-trans-llm" "$HOME/.agents/skills/sub-trans-llm"
+```
+
+Codex 到此即可使用。只为本机实际使用的其他 Agent 创建相应链接：
+
+```bash
+mkdir -p "$HOME/.claude/skills" "$HOME/.grok/skills" "$HOME/.hermes/skills"
+ln -s "$HOME/.agents/skills/sub-trans-llm" "$HOME/.claude/skills/sub-trans-llm"
+ln -s "$HOME/.agents/skills/sub-trans-llm" "$HOME/.grok/skills/sub-trans-llm"
+ln -s "$HOME/.agents/skills/sub-trans-llm" "$HOME/.hermes/skills/sub-trans-llm"
+```
+
+`ln -s` 在同名路径已存在时会失败；先检查现有目录或链接指向，不要使用强制覆盖。手动安装以当前 checkout 为 Skill 源，后续 `git pull` 会立即更新所有链接到的 Agent。
 
 ## 快速开始
 
