@@ -90,16 +90,27 @@ def _build_manifest(profile: ResolvedProfile, framework: dict[str, object]) -> d
         source_ids = {
             cue.seq for cue in parse_srt(Path(episode["source_srt"]))
         }
+        sample_ids = {int(sample["cue_id"]) for sample in episode["samples"]}
         missing = sorted(
-            int(sample["cue_id"])
-            for sample in episode["samples"]
-            if int(sample["cue_id"]) not in source_ids
+            cue_id for cue_id in sample_ids if cue_id not in source_ids
         )
         if missing:
             raise ProfileError(
                 f"episode {episode['id']} samples reference missing cue ids: "
                 + ", ".join(str(value) for value in missing)
             )
+        if data["tqa"]["reference_mode"] == "single_reference":
+            reference_ids = {
+                cue.seq for cue in parse_srt(Path(episode["reference_srt"]))
+            }
+            missing_reference = sorted(
+                cue_id for cue_id in sample_ids if cue_id not in reference_ids
+            )
+            if missing_reference:
+                raise ProfileError(
+                    f"episode {episode['id']} reference_srt is missing sample cue ids: "
+                    + ", ".join(str(value) for value in missing_reference)
+                )
     cases: list[dict[str, object]] = []
     for model in data["translation"]["models"]:
         for arm in data["sampling"]["arms"]:

@@ -29,7 +29,8 @@ inputs:
   episodes:
     - id: "E01" # 【必须修改】本集/本评估单元的唯一标识。
       source_srt: "./path/to/source.srt" # 【必须修改】待翻译的完整 SRT。
-      # 【按需修改】single_reference 模式必须提供；no_reference 模式删除或注释。
+      # 【按需修改】single_reference 时每个 episode 都必须各自提供一个；
+      # no_reference 模式删除或注释。
       # reference_srt: "./path/to/reference.zh.srt"
 
       # 【必须修改】TQA 定向评分条目。
@@ -118,7 +119,7 @@ tqa:
   # 仅当拥有可靠、经过人工审核的参考字幕，并理解参考角色语义时，
   # 才改为 single_reference，同时为每集提供 reference_srt。
   reference_mode: "no_reference"
-  # single_reference 的高级配置（二选一，取消对应行的注释）：
+  # single_reference 时 reference_role 必填（二选一，取消对应行的注释）：
   # reference_role: "anchor" # anchor：参考译文作为可信标准答案，候选会与其严格比较。
   # reference_role: "hint"   # hint：参考译文仅辅助理解，合理的不同译法不应被惩罚。
 

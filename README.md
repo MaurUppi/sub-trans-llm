@@ -21,6 +21,7 @@
 main.py                    # ping/selfcheck/repair/smoke/preprocess/run/bench
 model_client.py            # Chat/Responses 适配、模型配置与调用
 translate.py               # pipeline 公共 API 的兼容 re-export
+TQA.md                     # TQA v2 用户指南与当前支持边界
 pipeline/                  # 翻译、校验、repair、前处理与 TQA 实现
 pipeline/prompts/          # 公开运行时 prompt
 pipeline/tqa/              # TQA v2 Framework、Schema、默认 Profile 与流水线
@@ -115,6 +116,13 @@ python main.py bench --all --profile /path/to/my-tqa-profile.yaml
 
 ## TQA v2 benchmark
 
+TQA v2 是本项目的正式质量评测流水线，不只是多模型批量运行器。它使用一份统一 YAML Profile 定义候选模型、显式采样参数臂、完整字幕输入、定向评分样例、匿名 evaluator、聚合门槛和输出目录，并支持可恢复的 `plan → collect → evaluate → report` 全链路。
+
+- 模板文件：[pipeline/tqa/profile.default.yaml](pipeline/tqa/profile.default.yaml)。应先复制到实验目录再修改，不要直接把模板当作某次实验记录。
+- 普通用户建议保持无参考模式；单参考模式要求每集各自提供参考 SRT，并显式选择 `anchor` 或 `hint`。
+- `bench --all` 自动完成全部机器阶段，但最终停在 `awaiting_user_decision`，不会替代人工确认。
+- 完整概念、Profile 字段、参考模式、评分规则、产物和当前支持边界见 [TQA.md](TQA.md)。
+
 `bench` 与生产 `run` 分工明确：`run` 交付一个模型的一份字幕；`bench` 比较 Profile 中明确定义的模型与采样参数臂，并执行 TQA v2 评测。公开接口只有两种形式：
 
 ```bash
@@ -133,7 +141,7 @@ python main.py bench status   --profile /path/to/profile.yaml
 
 Profile 中的 `source_srt` 始终作为整份字幕进入 collect；`inputs.episodes[].samples` 只指定随后进入 TQA evaluator 评分的定向条目，不会限制翻译范围。若要逐条评分整份字幕，需要将全部 cue 列入 `samples`，相应的评分调用量和费用也会显著增加。
 
-Profile 中的文件路径建议统一使用 YAML 双引号，例如 `"./path/to/glossary.csv"`；`prompt: null` 与 `glossary: null` 表示不提供自定义文件，不能写成字符串 `"null"`。普通用户建议保持 `reference_mode: "no_reference"`。只有拥有可靠、经过人工审核的参考字幕时才使用 `single_reference`：`anchor` 表示把参考译文视为可信标准答案并严格比较，`hint` 表示参考译文只辅助理解，合理的不同译法不应被惩罚。
+Profile 中的文件路径建议统一使用 YAML 双引号，例如 `"./path/to/glossary.csv"`；`prompt: null` 与 `glossary: null` 表示不提供自定义文件，不能写成字符串 `"null"`。普通用户建议保持 `reference_mode: "no_reference"`。只有拥有可靠、经过人工审核的参考字幕时才使用 `single_reference`；此时 `reference_role` 必填，并且 `inputs.episodes[]` 中每一集都必须各自提供一个 `reference_srt`。`anchor` 表示把参考译文视为可信标准答案并严格比较，`hint` 表示参考译文只辅助理解，合理的不同译法不应被惩罚。
 
 `sampling.arms[].temperature/top_p` 控制候选翻译模型，是被比较的实验变量；`evaluator.temperature` 只控制匿名裁判模型评分时的随机性，不会改变任何候选译文。Evaluator 的任务是针对每个“样例 × 维度”读取匿名源文、候选译文及上下文，输出 0–10 分、硬失败类别、理由与置信度；为提高多轮评分一致性，通常使用较低的 evaluator temperature。
 

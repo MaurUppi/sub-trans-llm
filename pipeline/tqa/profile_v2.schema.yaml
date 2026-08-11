@@ -192,3 +192,20 @@ properties:
 $defs:
   hard_failure:
     enum: [SEMANTIC_INVERSION, IDENTITY_CONFUSION, CRITICAL_OMISSION, FABRICATION, OFFENSIVE_MISTRANSLATION]
+allOf:
+  - if:
+      properties:
+        tqa:
+          properties:
+            reference_mode: {const: single_reference}
+          required: [reference_mode]
+      required: [tqa]
+    then:
+      properties:
+        tqa:
+          required: [reference_role]
+        inputs:
+          properties:
+            episodes:
+              items:
+                required: [reference_srt]

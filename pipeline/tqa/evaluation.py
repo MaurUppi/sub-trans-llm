@@ -44,6 +44,17 @@ _ASSESSMENT_SCHEMA = yaml.safe_load(
 Draft202012Validator.check_schema(_ASSESSMENT_SCHEMA)
 _ASSESSMENT_VALIDATOR = Draft202012Validator(_ASSESSMENT_SCHEMA)
 
+_REFERENCE_INSTRUCTIONS = {
+    "anchor": (
+        "Treat the reference translation as an authoritative scoring anchor. "
+        "Penalize material deviations unless the candidate is demonstrably equivalent."
+    ),
+    "hint": (
+        "Use the reference translation only as a comprehension aid. Judge the "
+        "candidate independently and do not penalize reasonable alternatives."
+    ),
+}
+
 
 def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -110,10 +121,19 @@ def build_anonymous_inputs(
         episode = episodes[case["episode_id"]]
         source_cues = {str(cue.seq): cue for cue in parse_srt(episode["source_srt"])}
         reference_cues: dict[str, Any] = {}
-        if episode.get("reference_srt"):
+        single_reference = profile["tqa"]["reference_mode"] == "single_reference"
+        if single_reference:
             reference_cues = {
                 str(cue.seq): cue for cue in parse_srt(episode["reference_srt"])
             }
+        reference_role = (
+            profile["tqa"].get("reference_role") if single_reference else None
+        )
+        reference_instruction = (
+            _REFERENCE_INSTRUCTIONS[str(reference_role)]
+            if reference_role is not None
+            else None
+        )
         window = int(profile["evaluator"]["context_window"])
         ordered = list(source_cues.values())
         positions = {str(cue.seq): index for index, cue in enumerate(ordered)}
@@ -174,6 +194,8 @@ def build_anonymous_inputs(
                             if cue_key in reference_cues
                             else None
                         ),
+                        "reference_role": reference_role,
+                        "reference_instruction": reference_instruction,
                         "context_before": before,
                         "context_after": after,
                         "dimension_instance": profile["tqa"]["dimension_instances"][dimension],
@@ -262,7 +284,8 @@ def default_evaluator(profile: dict[str, Any]) -> Evaluator:
             "You are an anonymous subtitle translation quality evaluator. "
             "Return only one JSON object with exactly these fields: sample_id, "
             "dimension, score (integer 0..10), hard_failures (array), rationale, "
-            "confidence (0..1), evaluator_run_id. Echo identifiers exactly."
+            "confidence (0..1), evaluator_run_id. Echo identifiers exactly. "
+            "Follow reference_instruction exactly when it is non-null."
         )
         result = model_client.call(
             evaluator["model"],

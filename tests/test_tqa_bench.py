@@ -4,11 +4,13 @@ import json
 import hashlib
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import main
 import pytest
 import yaml
 from pipeline.tqa import runner
+from pipeline.tqa import evaluation as tqa_evaluation
 
 
 def _write_minimal_profile(tmp_path: Path) -> Path:
@@ -608,6 +610,192 @@ def test_single_reference_mode_requires_role_and_reference_for_every_episode(
     )
 
     assert main.main(["bench", "plan", "--profile", str(profile)]) == 2
+
+
+def test_single_reference_requires_each_sample_cue_in_reference_srt(
+    tmp_path: Path,
+) -> None:
+    profile = _write_minimal_profile(tmp_path)
+    (tmp_path / "reference.srt").write_text(
+        "2\n00:00:00,000 --> 00:00:01,000\n错误序号。\n\n",
+        encoding="utf-8",
+    )
+    data = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    data["inputs"]["episodes"][0]["reference_srt"] = "reference.srt"
+    data["tqa"]["reference_mode"] = "single_reference"
+    data["tqa"]["reference_role"] = "anchor"
+    profile.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    assert main.main(["bench", "plan", "--profile", str(profile)]) == 2
+    assert not (tmp_path / "bench-out" / "profile.lock.json").exists()
+
+
+def test_no_reference_mode_never_sends_a_configured_reference(
+    tmp_path: Path,
+) -> None:
+    profile = _write_minimal_profile(tmp_path)
+    (tmp_path / "reference.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n不应发送。\n\n",
+        encoding="utf-8",
+    )
+    data = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    data["inputs"]["episodes"][0]["reference_srt"] = "reference.srt"
+    profile.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    evaluated: list[dict[str, object]] = []
+
+    def fake_translate(**_request: object) -> dict[str, object]:
+        return {"status": "completed", "translations": {"1": "候选。"}}
+
+    def fake_evaluate(payload: dict[str, object]) -> dict[str, object]:
+        evaluated.append(payload)
+        return {
+            "sample_id": payload["sample_id"],
+            "dimension": payload["dimension"],
+            "score": 8,
+            "hard_failures": [],
+            "rationale": "No reference used.",
+            "confidence": 0.9,
+            "evaluator_run_id": payload["evaluator_run_id"],
+        }
+
+    assert runner.run_pipeline(
+        profile_path=profile,
+        action="all",
+        translate_fn=fake_translate,
+        evaluate_fn=fake_evaluate,
+    ) == 0
+    assert len(evaluated) == 1
+    assert evaluated[0]["reference_text"] is None
+    assert evaluated[0]["reference_role"] is None
+    assert evaluated[0]["reference_instruction"] is None
+
+
+@pytest.mark.parametrize(
+    ("role", "instruction_fragment"),
+    [
+        ("anchor", "authoritative scoring anchor"),
+        ("hint", "only as a comprehension aid"),
+    ],
+)
+def test_single_reference_role_and_per_episode_reference_reach_evaluator(
+    tmp_path: Path,
+    role: str,
+    instruction_fragment: str,
+) -> None:
+    profile = _write_minimal_profile(tmp_path)
+    (tmp_path / "episode-2.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello again.\n\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "reference-1.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n参考一。\n\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "reference-2.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n参考二。\n\n",
+        encoding="utf-8",
+    )
+    data = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    first_episode = data["inputs"]["episodes"][0]
+    first_episode["reference_srt"] = "reference-1.srt"
+    second_episode = dict(first_episode)
+    second_episode["id"] = "E02"
+    second_episode["source_srt"] = "episode-2.srt"
+    second_episode["reference_srt"] = "reference-2.srt"
+    data["inputs"]["episodes"].append(second_episode)
+    data["tqa"]["reference_mode"] = "single_reference"
+    data["tqa"]["reference_role"] = role
+    profile.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    evaluated: list[dict[str, object]] = []
+
+    def fake_translate(**_request: object) -> dict[str, object]:
+        return {"status": "completed", "translations": {"1": "候选。"}}
+
+    def fake_evaluate(payload: dict[str, object]) -> dict[str, object]:
+        evaluated.append(payload)
+        return {
+            "sample_id": payload["sample_id"],
+            "dimension": payload["dimension"],
+            "score": 8,
+            "hard_failures": [],
+            "rationale": "Reference contract applied.",
+            "confidence": 0.9,
+            "evaluator_run_id": payload["evaluator_run_id"],
+        }
+
+    assert runner.run_pipeline(
+        profile_path=profile,
+        action="all",
+        translate_fn=fake_translate,
+        evaluate_fn=fake_evaluate,
+    ) == 0
+    assert len(evaluated) == 2
+    assert {item["reference_text"] for item in evaluated} == {"参考一。", "参考二。"}
+    assert {item["reference_role"] for item in evaluated} == {role}
+    assert all(
+        instruction_fragment in str(item["reference_instruction"])
+        for item in evaluated
+    )
+
+
+def test_default_evaluator_is_told_to_follow_reference_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_call(_model: str, _input_text: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            text=(
+                '{"sample_id":"sample-1","dimension":"上下文依赖",'
+                '"score":8,"hard_failures":[],"rationale":"ok",'
+                '"confidence":0.9,"evaluator_run_id":"eval-1"}'
+            )
+        )
+
+    monkeypatch.setattr(tqa_evaluation.model_client, "call", fake_call)
+    evaluate = tqa_evaluation.default_evaluator(
+        {
+            "translation": {"api_mode": "chat_completions"},
+            "evaluator": {
+                "model": "judge",
+                "temperature": 0.3,
+                "max_output_tokens": 2048,
+                "timeout": 300,
+            },
+        }
+    )
+    evaluate(
+        {
+            "sample_id": "sample-1",
+            "dimension": "上下文依赖",
+            "evaluator_run_id": "eval-1",
+            "reference_instruction": "Use only as a hint.",
+        }
+    )
+
+    assert "Follow reference_instruction" in str(captured["instructions"])
+
+
+def test_public_tqa_guide_matches_current_reference_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    guide = (root / "TQA.md").read_text(encoding="utf-8")
+
+    assert "[TQA.md](TQA.md)" in readme
+    assert "一集对应一个 `reference_srt`" in guide
+    assert "`single_reference` 时必填" in guide
+    assert "当前不支持 `multi_reference`" in guide
+    assert "`anchor`" in guide and "`hint`" in guide
 
 
 def test_collect_rejects_source_drift_after_manifest_freeze(tmp_path: Path) -> None:

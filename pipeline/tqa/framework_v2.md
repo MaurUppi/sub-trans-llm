@@ -17,6 +17,16 @@ TQA v2 是语言和题材无关的影视字幕翻译质量评估契约。每条�
 
 领域术语、话语体系、长句/复杂句、习语/口语、上下文依赖、正式语体、非母语口语、情感张力、讽刺。Profile 仅需实例化本次样例实际使用的维度，并为全部权重给出总和 1.0 的非负数。
 
+## 参考模式
+
+- `no_reference`：不向 evaluator 提供参考译文，且不需要 `reference_role`。
+- `single_reference`：`tqa.reference_role` 必须为 `anchor` 或 `hint`，并且 `inputs.episodes[]` 中每一集都必须各自提供一个 `reference_srt`。
+- 每个定向样例的 cue id 必须同时存在于对应集的源 SRT 和参考 SRT。
+- `anchor` 把参考译文作为可信评分锚点；`hint` 仅把参考译文用于辅助理解，不惩罚合理的不同译法。
+- 当前一集最多支持一个参考字幕文件，不支持 `multi_reference`。
+
+Evaluator 输入会同时携带当前集对应 cue 的 `reference_text`、`reference_role` 和明确的 `reference_instruction`，确保两个角色产生不同的评分约束。
+
 ## 状态判定
 
 集的硬失败数超过配置上界且启用否决时为 VETO；未达到集分门槛或失败维度/硬失败超出 conditional 容忍范围时为 FAIL；在分数达标且异常仍位于容忍范围内时为 CONDITIONAL_PASS；否则 PASS。模型分数另须达到模型门槛。
