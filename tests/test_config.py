@@ -8,8 +8,11 @@ from pipeline import config
 def test_defaults_and_paths():
     assert config.DEFAULT_BATCH_SIZE == 50
     assert config.DEFAULT_MAX_OUTPUT_TOKENS == 131072
-    assert config.DEFAULT_PROMPT.name == "translation_prompt.md"
-    assert config.DEFAULT_GLOSSARY.is_file() or True  # path defined
+    assert config.DEFAULT_PROMPT.name == "translation.md"
+    assert config.DEFAULT_PROMPT.parent.name == "prompts"
+    assert config.DEFAULT_PROMPT.parent.parent.name == "pipeline"
+    assert config.DEFAULT_PROMPT.is_file()
+    assert config.DEFAULT_GLOSSARY is None
     assert config.ROOT.is_dir()
     assert config.ELLIPSIS_OK == "\u2026"
     assert config.ELLIPSIS_BAD == "\u22ef"

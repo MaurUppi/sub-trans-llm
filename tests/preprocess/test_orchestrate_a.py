@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pipeline.preprocess.config import PreprocessConfig
 from pipeline.preprocess.orchestrate_a import run_preprocess
+from pipeline.preprocess import vc_optimize_adapter
 
 
 def test_preprocess_identity_on_clean(sample_srt, tmp_path):
@@ -30,6 +33,28 @@ def test_preprocess_fixes_overlap(tmp_path):
     )
     assert r.meta["steps"]["fix_overlaps"]["applied"] is True
     assert r.meta["steps"]["fix_overlaps"]["detected"] >= 1
-    # after fix, second start should be >= first end
-    assert r.cues[0].end <= r.cues[1].start or True  # string compare weak; check meta
+    # SRT timestamps are zero-padded, so lexical order matches chronological order.
+    assert r.cues[0].end <= r.cues[1].start
     assert len(r.cues) == 2
+
+
+def test_requested_optimize_failure_is_not_silently_skipped(
+    sample_srt,
+    tmp_path,
+    monkeypatch,
+):
+    def fail_optimize(*_args, **_kwargs):
+        raise RuntimeError("provider failed")
+
+    monkeypatch.setattr(vc_optimize_adapter, "optimize_document", fail_optimize)
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        run_preprocess(
+            sample_srt,
+            PreprocessConfig(
+                work_dir=tmp_path / "w",
+                optimize=True,
+                model="qwen3.7-plus",
+                resplit="off",
+            ),
+        )

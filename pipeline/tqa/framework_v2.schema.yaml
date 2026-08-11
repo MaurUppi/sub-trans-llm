@@ -1,0 +1,20 @@
+schema_version: 1
+score:
+  type: integer
+  minimum: 0
+  maximum: 10
+hard_failure_categories:
+  - SEMANTIC_INVERSION
+  - IDENTITY_CONFUSION
+  - CRITICAL_OMISSION
+  - FABRICATION
+  - OFFENSIVE_MISTRANSLATION
+aggregation_path:
+  - sample_dimension_raw_score
+  - episode_dimension_mean
+  - episode_weighted_score
+  - model_sample_count_weighted_score
+sample_aggregation:
+  report_only: true
+status_priority: [VETO, FAIL, CONDITIONAL_PASS, PASS]
+max_fields_are_inclusive: true

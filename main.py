@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-六模型字幕翻译 Benchmark 调度入口。
+多语言译简中字幕工具调度入口。
 
   python main.py ping
   python main.py smoke --srt ... --max-cues 8 --models all
   python main.py run   --srt ... --model deepseek-v4-flash
-  python main.py bench --srt ... --jobs 1
+  python main.py bench --all --profile path/to/profile.yaml
   python main.py selfcheck --srt ...
 """
 
@@ -13,17 +13,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import model_client
 import translate
+from pipeline.config import DEFAULT_PROMPT
 
 _ROOT = Path(__file__).resolve().parent
-DEFAULT_SRT = _ROOT / "sample" / "A.French.Village.S01E03_eng.srt"
 
 
 def _parse_models(spec: str) -> list[str]:
@@ -35,7 +37,7 @@ def _parse_models(spec: str) -> list[str]:
 
 def _default_out(prefix: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return _ROOT / "out" / f"{prefix}_{ts}"
+    return _ROOT / "out" / f"{prefix}_{ts}_{uuid4().hex[:8]}"
 
 
 def _write_summary(out_dir: Path, results: list[translate.TranslateResult]) -> None:
@@ -91,7 +93,16 @@ def _write_summary(out_dir: Path, results: list[translate.TranslateResult]) -> N
 
 
 def cmd_ping(args: argparse.Namespace) -> int:
-    rows = model_client.smoke_test(api_mode=args.api_mode)
+    models = _parse_models(args.models)
+    if not models:
+        print("ping requires at least one model", file=sys.stderr)
+        return 2
+    rows = model_client.smoke_test(
+        models,
+        max_output_tokens=args.max_output_tokens,
+        prompt=args.prompt,
+        api_mode=args.api_mode,
+    )
     ok_n = sum(1 for r in rows if r.ok)
     for r in rows:
         mark = "OK" if r.ok else "FAIL"
@@ -104,21 +115,59 @@ def cmd_ping(args: argparse.Namespace) -> int:
 
 
 def cmd_selfcheck(args: argparse.Namespace) -> int:
-    srt = Path(args.srt or DEFAULT_SRT)
-    translate.self_check_offline(srt)
+    translate.self_check_offline(
+        Path(args.srt),
+        source_language=args.source_language,
+        target_language=args.target_language,
+        prompt_path=Path(args.prompt),
+        glossary_path=Path(args.glossary) if args.glossary else None,
+    )
     return 0
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
     """对已有 run 目录重跑失败批并合并。"""
     run_dir = Path(args.run_dir)
-    if not run_dir.is_dir():
-        # allow parent that contains model subdir
-        if (run_dir / args.model).is_dir():
-            run_dir = run_dir / args.model
-        else:
-            print(f"run dir not found: {run_dir}", file=sys.stderr)
+    model_dir = run_dir / args.model.replace("/", "_")
+    if model_dir.is_dir():
+        run_dir = model_dir
+    elif not run_dir.is_dir():
+        print(f"run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+
+    recorded_api_mode = None
+    meta: dict[str, object] = {}
+    meta_path = run_dir / "meta.json"
+    if meta_path.is_file():
+        try:
+            loaded_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_meta, dict):
+                raise ValueError("meta root must be a JSON object")
+            meta = loaded_meta
+            if meta.get("api_mode"):
+                recorded_api_mode = model_client.normalize_api_mode(
+                    str(meta["api_mode"])
+                )
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"invalid run meta: {meta_path}: {exc}", file=sys.stderr)
             return 2
+    if (
+        args.api_mode is not None
+        and recorded_api_mode is not None
+        and args.api_mode != recorded_api_mode
+    ):
+        print(
+            f"api mode mismatch: run recorded {recorded_api_mode}, "
+            f"requested {args.api_mode}",
+            file=sys.stderr,
+        )
+        return 2
+    api_mode = (
+        args.api_mode
+        or recorded_api_mode
+        or model_client.DEFAULT_API_MODE
+    )
+    temperature, top_p = _repair_sampling_from_meta(args, meta)
     indices = None
     if args.batches:
         indices = [int(x) for x in args.batches.split(",") if x.strip() != ""]
@@ -132,9 +181,9 @@ def cmd_repair(args: argparse.Namespace) -> int:
         max_retries=args.max_retries,
         retry_backoff_sec=args.retry_backoff,
         sub_batch_size=getattr(args, "sub_batch_size", 10),
-        temperature=_sampling_from_args(args)[0],  # type: ignore[arg-type]
-        top_p=_sampling_from_args(args)[1],  # type: ignore[arg-type]
-        api_mode=args.api_mode,
+        temperature=temperature,  # type: ignore[arg-type]
+        top_p=top_p,  # type: ignore[arg-type]
+        api_mode=api_mode,
     )
     print(
         f"{'OK' if r.ok else 'FAIL'} repair {run_dir} "
@@ -144,13 +193,13 @@ def cmd_repair(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
-def _maybe_preprocess(args: argparse.Namespace) -> Path:
-    """If --preprocess, run Stage A and return clean SRT path; else original."""
-    srt = Path(args.srt)
-    if not getattr(args, "preprocess", False):
-        return srt
+def _preprocess_config_from_args(
+    args: argparse.Namespace,
+    *,
+    work_dir: Path | None,
+):
+    """Build the one Stage A config shared by both CLI entry points."""
     from pipeline.preprocess.config import PreprocessConfig
-    from pipeline.preprocess.orchestrate_a import run_preprocess
 
     fix = "auto"
     if getattr(args, "fix_overlaps", False):
@@ -162,21 +211,37 @@ def _maybe_preprocess(args: argparse.Namespace) -> Path:
         resplit = "on"
     if getattr(args, "no_resplit", False):
         resplit = "off"
-    work = Path(args.out) / "_preprocess" if args.out else None
-    cfg = PreprocessConfig(
+    model = getattr(args, "model", None)
+    if getattr(args, "optimize", False) and not model:
+        raise ValueError("--optimize requires --model")
+    words_path = Path(args.words) if getattr(args, "words", None) else None
+    if words_path is not None and not words_path.is_file():
+        raise ValueError(f"words file not found: {words_path}")
+    return PreprocessConfig(
         fix_overlaps=fix,  # type: ignore[arg-type]
         remove_sdh=bool(getattr(args, "remove_sdh", False)),
         remove_disfluency=bool(getattr(args, "remove_disfluency", False)),
         optimize=bool(getattr(args, "optimize", False)),
         resplit=resplit,  # type: ignore[arg-type]
-        words_path=Path(args.words) if getattr(args, "words", None) else None,
-        model=getattr(args, "model", None) or getattr(args, "models", None),
+        words_path=words_path,
+        model=model,
         api_mode=args.api_mode,
-        work_dir=work,
+        work_dir=work_dir,
     )
-    # single-model string if models is list-like string
-    if isinstance(cfg.model, str) and "," in cfg.model:
-        cfg.model = cfg.model.split(",")[0].strip()
+
+
+def _maybe_preprocess(
+    args: argparse.Namespace,
+    *,
+    work_dir: Path | None = None,
+) -> Path:
+    """If --preprocess, run Stage A and return clean SRT path; else original."""
+    srt = Path(args.srt)
+    if not getattr(args, "preprocess", False):
+        return srt
+    from pipeline.preprocess.orchestrate_a import run_preprocess
+
+    cfg = _preprocess_config_from_args(args, work_dir=work_dir)
     pr = run_preprocess(srt, cfg)
     assert pr.clean_srt_path is not None
     print(f"preprocess: clean → {pr.clean_srt_path}")
@@ -197,11 +262,32 @@ def _sampling_from_args(args: argparse.Namespace) -> tuple[object, object]:
     )
 
 
+def _repair_sampling_from_meta(
+    args: argparse.Namespace,
+    meta: dict[str, object],
+) -> tuple[object, object]:
+    """Use explicit repair sampling values, otherwise preserve run evidence."""
+    recorded = meta.get("sampling")
+    sampling = recorded if isinstance(recorded, dict) else {}
+
+    def one(name: str) -> object:
+        explicit = getattr(args, name, None)
+        if explicit is not None:
+            return explicit
+        evidence = sampling.get(name)
+        if isinstance(evidence, dict) and evidence.get("sent") is True:
+            value = evidence.get("value")
+            if value is not None:
+                return float(value)
+        return model_client.OMIT
+
+    return one("temperature"), one("top_p")
+
+
 def warn_if_both_sampling(args: argparse.Namespace) -> None:
     """同时显式指定 temperature 与 top_p 时给出警告。
 
-    阿里云 Responses 参数表（docs/阿里云-OpenAI兼容-Responses创建响应.md L85-86）
-    对两者都写了「建议只设置其中一个值」，与 OpenAI 的口径一致：两者叠加会让
+    阿里云与 OpenAI 的 API 参数说明都建议只设置其中一个值：两者叠加会让
     参数效果不可归因。故意只警告不阻断——官方 SCENARIO_CONFIGS 的翻译配置
     (temperature=0.3, top_p=0.8) 本身就同时给两个值，硬互斥会让它无法复现。
     """
@@ -282,6 +368,9 @@ def _deliver_zh(args: argparse.Namespace, results: list[translate.TranslateResul
 
 def cmd_smoke(args: argparse.Namespace) -> int:
     models = _parse_models(args.models)
+    if not models:
+        print("smoke requires at least one model", file=sys.stderr)
+        return 2
     out_dir = Path(args.out) if args.out else _default_out("smoke")
     if args.max_cues is None:
         args.max_cues = 8
@@ -294,36 +383,19 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         f"batch_size={args.batch_size} batch_jobs={args.batch_jobs} "
         f"max_out={args.max_output_tokens} out={out_dir}"
     )
-    return _dispatch(models, args, out_dir)
+    return _dispatch(models, args, out_dir, catch_serial_exceptions=True)
 
 
 def cmd_preprocess(args: argparse.Namespace) -> int:
     """Stage A only."""
-    from pipeline.preprocess.config import PreprocessConfig
     from pipeline.preprocess.orchestrate_a import run_preprocess
 
-    fix = "auto"
-    if getattr(args, "fix_overlaps", False):
-        fix = "on"
-    if getattr(args, "no_fix_overlaps", False):
-        fix = "off"
-    resplit = "auto"
-    if getattr(args, "resplit", False):
-        resplit = "on"
-    if getattr(args, "no_resplit", False):
-        resplit = "off"
     work = Path(args.out) if args.out else None
-    cfg = PreprocessConfig(
-        fix_overlaps=fix,  # type: ignore[arg-type]
-        remove_sdh=bool(args.remove_sdh),
-        remove_disfluency=bool(args.remove_disfluency),
-        optimize=bool(args.optimize),
-        resplit=resplit,  # type: ignore[arg-type]
-        words_path=Path(args.words) if args.words else None,
-        model=args.model,
-        api_mode=args.api_mode,
-        work_dir=work,
-    )
+    try:
+        cfg = _preprocess_config_from_args(args, work_dir=work)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     pr = run_preprocess(args.srt, cfg)
     print(
         f"OK preprocess {pr.meta['counts'].get('in')}→{pr.meta['counts'].get('out')} "
@@ -335,6 +407,21 @@ def cmd_preprocess(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     if not args.model:
         print("run requires --model", file=sys.stderr)
+        return 2
+    stage_a_options = (
+        "fix_overlaps",
+        "no_fix_overlaps",
+        "remove_sdh",
+        "remove_disfluency",
+        "optimize",
+        "resplit",
+        "no_resplit",
+        "words",
+    )
+    if not args.preprocess and any(
+        bool(getattr(args, field, False)) for field in stage_a_options
+    ):
+        print("Stage A options require --preprocess", file=sys.stderr)
         return 2
     models = [args.model]
     out_dir = Path(args.out) if args.out else _default_out(f"run_{args.model}")
@@ -348,25 +435,42 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(args, "batch_size", None) is None:
         args.batch_size = 50
     args._original_srt = Path(args.srt)
-    args._resolved_srt = _maybe_preprocess(args)
+    try:
+        args._resolved_srt = _maybe_preprocess(
+            args,
+            work_dir=out_dir / "_preprocess",
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"前处理失败: {type(exc).__name__}: {exc}")
+        print(f"失败证据: {out_dir}")
+        return 1
     args.srt = str(args._resolved_srt)
     print(
         f"run: model={args.model} batch_size={args.batch_size} "
         f"batch_jobs={args.batch_jobs} "
         f"{_fmt_sampling(args)} "
         f"preprocess={bool(getattr(args, 'preprocess', False))} "
-        f"api_mode={args.api_mode} out={out_dir}"
+        f"api_mode={args.api_mode} workspace={out_dir}"
     )
-    code = _dispatch(models, args, out_dir)
+    try:
+        code = _dispatch(models, args, out_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"运行失败: {type(exc).__name__}: {exc}")
+        print(f"失败证据: {out_dir}")
+        return 1
     # re-load results for deliver? _dispatch doesn't return results.
     # Deliver from model out dir bilingual if present.
-    from pipeline.preprocess.deliver import default_zh_path, write_zh_srt
+    from pipeline.preprocess.deliver import write_zh_srt
     from model_client import Usage
     from pipeline.models import TranslateResult, ValidateReport
 
     model_out = out_dir / args.model.replace("/", "_")
     bi = model_out / "bilingual.srt"
-    if bi.is_file():
+    delivered = False
+    if code == 0 and bi.is_file():
         r = TranslateResult(
             model_alias=args.model,
             model_id="",
@@ -378,46 +482,83 @@ def cmd_run(args: argparse.Namespace) -> int:
             raw_text="",
             elapsed_sec=0.0,
         )
-        path = write_zh_srt(
-            r,
-            getattr(args, "_original_srt", Path(args.srt)),
-            output=getattr(args, "output", None),
-        )
+        try:
+            path = write_zh_srt(
+                r,
+                getattr(args, "_original_srt", Path(args.srt)),
+                output=getattr(args, "output", None),
+            )
+        except OSError as exc:
+            print(f"交付失败: {exc}")
+            print(f"失败证据: {out_dir}")
+            return 1
         if path:
             print(f"交付: {path}")
+            delivered = True
+    if code == 0 and delivered:
+        try:
+            shutil.rmtree(out_dir)
+        except OSError as exc:
+            print(f"警告: 临时运行目录清理失败: {exc} → {out_dir}")
+        else:
+            print("过程: 已清理临时运行目录")
+    elif code == 0:
+        print("交付失败: 未生成最终字幕")
+        print(f"失败证据: {out_dir}")
+        return 1
+    elif code != 0:
+        print(f"失败证据: {out_dir}")
     return code
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
-    models = _parse_models(args.models)
-    out_dir = Path(args.out) if args.out else _default_out("bench")
-    if args.max_output_tokens is None:
-        args.max_output_tokens = 131072
-    if args.timeout is None:
-        args.timeout = 1200.0
-    if getattr(args, "batch_size", None) is None:
-        args.batch_size = 50
-    print(
-        f"bench: models={models} model_jobs={args.jobs} "
-        f"batch_size={args.batch_size} batch_jobs={args.batch_jobs} "
-        f"max_cues={args.max_cues} out={out_dir}"
+    if bool(args.bench_all) == bool(args.bench_action):
+        print("bench: 必须且只能指定一个阶段或 --all", file=sys.stderr)
+        return 2
+    from pipeline.tqa.runner import run_bench
+
+    return run_bench(
+        profile_path=Path(args.profile),
+        action="all" if args.bench_all else args.bench_action,
     )
-    return _dispatch(models, args, out_dir)
 
 
 def _dispatch(
     models: list[str],
     args: argparse.Namespace,
     out_dir: Path,
+    *,
+    catch_serial_exceptions: bool = False,
 ) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[translate.TranslateResult] = []
     jobs = max(1, int(args.jobs or 1))
 
+    def failed_result(model: str, exc: Exception) -> translate.TranslateResult:
+        print(f"FAIL {model}: {exc}")
+        return translate.TranslateResult(
+            model_alias=model,
+            model_id="",
+            usage=model_client.Usage(),
+            status=f"error: {exc}",
+            incomplete_reason=None,
+            validate=translate.ValidateReport(ok=False, errors=[str(exc)]),
+            bilingual_srt=None,
+            raw_text="",
+            elapsed_sec=0.0,
+            api_mode=args.api_mode,
+        )
+
     if jobs == 1:
         for m in models:
             print(f"\n=== {m} ===")
-            r = _run_one(m, args, out_dir)
+            if catch_serial_exceptions:
+                try:
+                    r = _run_one(m, args, out_dir)
+                except Exception as exc:  # noqa: BLE001
+                    r = failed_result(m, exc)
+            else:
+                r = _run_one(m, args, out_dir)
             results.append(r)
             print(
                 f"{'OK' if r.ok else 'FAIL'} status={r.status} "
@@ -433,20 +574,7 @@ def _dispatch(
                 try:
                     r = fut.result()
                 except Exception as e:  # noqa: BLE001
-                    print(f"FAIL {m}: {e}")
-                    r = translate.TranslateResult(
-                        model_alias=m,
-                        model_id="",
-                        usage=model_client.Usage(),
-                        status=f"error: {e}",
-                        incomplete_reason=None,
-                        validate=translate.ValidateReport(
-                            ok=False, errors=[str(e)]
-                        ),
-                        bilingual_srt=None,
-                        raw_text="",
-                        elapsed_sec=0.0,
-                    )
+                    r = failed_result(m, e)
                 results.append(r)
                 print(
                     f"{'OK' if r.ok else 'FAIL'} {r.model_alias} "
@@ -463,18 +591,26 @@ def _dispatch(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="六模型字幕翻译 benchmark")
+    p = argparse.ArgumentParser(description="多语言译简中字幕工具")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add_api_mode(sp: argparse.ArgumentParser) -> None:
+    def add_api_mode(
+        sp: argparse.ArgumentParser,
+        *,
+        default: str | None = model_client.DEFAULT_API_MODE,
+    ) -> None:
         sp.add_argument(
             "--APImode",
             "--api-mode",
             dest="api_mode",
             type=model_client.normalize_api_mode,
-            default=model_client.DEFAULT_API_MODE,
+            default=default,
             metavar="MODE",
-            help="API 模式：ChatCompletion（默认）或 Responses",
+            help=(
+                "API 模式：ChatCompletion（默认）或 Responses"
+                if default is not None
+                else "API 模式覆盖；默认复用 run 记录"
+            ),
         )
 
     def add_common(
@@ -487,8 +623,8 @@ def build_parser() -> argparse.ArgumentParser:
         if need_srt:
             sp.add_argument(
                 "--srt",
-                default=str(DEFAULT_SRT),
-                help="英文字幕 SRT 路径",
+                required=True,
+                help="源语言字幕 SRT 路径",
             )
         sp.add_argument(
             "--source-language",
@@ -502,7 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument(
             "--prompt",
-            default=str(_ROOT / "docs" / "translation_prompt.md"),
+            default=str(DEFAULT_PROMPT),
         )
         sp.add_argument(
             "--glossary",
@@ -575,19 +711,95 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
 
-    sp = sub.add_parser("ping", help="最少 token 连通六模型")
+    sp = sub.add_parser(
+        "ping",
+        help="最少 token 检查已配置模型的 API 连通性",
+    )
     add_api_mode(sp)
+    sp.add_argument("--models", default="all", help="逗号分隔 alias，或 all")
+    sp.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=16,
+        help="单次连通请求的最大输出 token（默认 16）",
+    )
+    sp.add_argument(
+        "--prompt",
+        default="Reply with exactly: OK",
+        help="连通请求文本（默认要求模型仅回复 OK）",
+    )
     sp.set_defaults(func=cmd_ping)
 
-    sp = sub.add_parser("selfcheck", help="离线自检 parse/validate/srt")
-    add_common(sp)
+    sp = sub.add_parser(
+        "selfcheck",
+        help="离线检查 SRT、prompt、Glossary 与输出契约",
+    )
+    sp.add_argument("--srt", required=True, help="源语言字幕 SRT 路径")
+    sp.add_argument(
+        "--source-language",
+        default="英语",
+        help="源语言名称（默认：英语）",
+    )
+    sp.add_argument(
+        "--target-language",
+        default="简体中文",
+        help="目标语言名称（默认：简体中文）",
+    )
+    sp.add_argument(
+        "--prompt",
+        default=str(DEFAULT_PROMPT),
+        help="prompt 模板路径",
+    )
+    sp.add_argument(
+        "--glossary",
+        default=None,
+        help="可选 CSV/Markdown Glossary 路径",
+    )
     sp.set_defaults(func=cmd_selfcheck)
 
     sp = sub.add_parser(
         "repair",
         help="重跑已有 run 目录中的失败批并合并（可先离线 JSON 加固）",
     )
-    add_common(sp)
+    add_api_mode(sp, default=None)
+    sp.add_argument("--srt", required=True, help="原 run 使用的源语言 SRT 路径")
+    sp.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=8192,
+        help="API 重跑最大输出 token（默认 8192）",
+    )
+    sp.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="单次 API 请求超时秒数（默认 300）",
+    )
+    sp.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="失败后的额外重试次数（默认 2）",
+    )
+    sp.add_argument(
+        "--retry-backoff",
+        type=float,
+        default=3.0,
+        help="指数退避基数秒数（默认 3）",
+    )
+    sp.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="显式覆盖重跑 temperature；默认复用 run 记录，缺失则不发送",
+    )
+    sp.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        dest="top_p",
+        help="显式覆盖重跑 top_p；默认复用 run 记录，缺失则不发送",
+    )
     sp.add_argument(
         "--run-dir",
         required=True,
@@ -611,7 +823,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_repair)
 
-    sp = sub.add_parser("smoke", help="小规模烟测（默认前 8 条）")
+    sp = sub.add_parser(
+        "smoke",
+        help="端到端字幕烟测（默认前 8 条）",
+    )
     add_common(sp)
     sp.add_argument(
         "--models",
@@ -621,12 +836,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_smoke)
 
     def add_preprocess_flags(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument(
+        overlap = sp.add_mutually_exclusive_group()
+        overlap.add_argument(
             "--fix-overlaps",
             action="store_true",
-            help="强制启用时间轴去重叠（默认 auto：检测到重叠才修）",
+            help=(
+                "强制裁剪相邻 cue 重叠，主要用于 YouTube 滚动窗口自动字幕"
+                "（默认 auto：检测到至少一处 50ms 以上重叠后修复全部相邻重叠）"
+            ),
         )
-        sp.add_argument(
+        overlap.add_argument(
             "--no-fix-overlaps",
             action="store_true",
             help="禁用时间轴去重叠",
@@ -637,22 +856,40 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="移除口癖/重复（改原文）",
         )
-        sp.add_argument("--optimize", action="store_true", help="LLM 源文优化（条数不变）")
-        sp.add_argument("--resplit", action="store_true", help="强制重切过长字幕")
-        sp.add_argument("--no-resplit", action="store_true", help="禁止重切")
+        sp.add_argument(
+            "--optimize",
+            action="store_true",
+            help="LLM 优化源文并保持 cue 数量（必须同时指定 --model；失败即终止）",
+        )
+        resplit = sp.add_mutually_exclusive_group()
+        resplit.add_argument(
+            "--resplit",
+            action="store_true",
+            help=(
+                "强制执行源字幕启发式重切（默认 auto：英文单行超过 42 字符或超过 2 行"
+                "时触发；非 Netflix 简中交付校验）"
+            ),
+        )
+        resplit.add_argument("--no-resplit", action="store_true", help="禁止源字幕启发式重切")
         sp.add_argument(
             "--words",
             default=None,
             help="词级时间戳 JSON（启用 VideoCaptioner Split 时）",
         )
 
-    sp = sub.add_parser("preprocess", help="Stage A：字幕前处理（不翻译）")
-    add_common(sp)
+    sp = sub.add_parser(
+        "preprocess",
+        help="Stage A：字幕前处理（不翻译）",
+        allow_abbrev=False,
+    )
+    add_api_mode(sp)
+    sp.add_argument("--srt", required=True, help="源语言字幕 SRT 路径")
+    sp.add_argument("--out", default=None, help="Stage A 证据输出目录")
     add_preprocess_flags(sp)
     sp.add_argument(
         "--model",
         default=None,
-        help="optimize/resplit-LLM 时使用的模型 alias",
+        help="--optimize 或带 --words 的语义重切所用模型 alias",
     )
     sp.set_defaults(func=cmd_preprocess)
 
@@ -674,14 +911,33 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "最终双语 SRT 文件路径；默认写到 --srt 同目录的 "
-            "{stem}_zh.srt"
+            "{stem}_zh.srt；成功时仅保留最终 SRT，失败时保留过程证据"
         ),
     )
     sp.set_defaults(func=cmd_run)
 
-    sp = sub.add_parser("bench", help="多模型 benchmark")
-    add_common(sp)
-    sp.add_argument("--models", default="all")
+    sp = sub.add_parser(
+        "bench",
+        help="配置驱动的多模型 TQA 评测",
+        allow_abbrev=False,
+    )
+    sp.add_argument(
+        "bench_action",
+        nargs="?",
+        choices=("plan", "collect", "evaluate", "report", "status"),
+        help="单独执行一个阶段；完整流水线使用 --all",
+    )
+    sp.add_argument(
+        "--all",
+        action="store_true",
+        dest="bench_all",
+        help="自动执行至 awaiting_user_decision",
+    )
+    sp.add_argument(
+        "--profile",
+        required=True,
+        help="统一 TQA YAML Profile 路径",
+    )
     sp.set_defaults(func=cmd_bench)
 
     return p

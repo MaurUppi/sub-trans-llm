@@ -1,69 +1,35 @@
-# translation-test
+# Sub-trans-llm
 
-英→简中字幕翻译与参数采集工具：读取整集或切片英文 SRT，以 JSON 协议调用模型，完成回显对齐、结果校验和失败重试，最后生成“译文在上、原文在下”的双语 SRT。
+一个多语言译简中字幕工具：读取 SRT，以 JSON 协议调用 OpenAI 兼容模型，校验原文回显与条目完整性，并输出“译文在上、原文在下”的双语 SRT。源语言默认英语、目标语言默认简体中文；在模型能力范围内，可通过 `--source-language` 和 `--target-language` 显式指定其他语言。
 
-仓库目前有三层用途：
-
-- 通用六模型翻译 CLI：单模型运行、六模型 benchmark、前处理和失败批修复。
-- Opus 4.6-Low 参数对齐采集器：仅针对方舟 `deepseek-v4-flash` 与阿里云 `qwen3.7-plus` 的冻结 40-case 矩阵。
-- TQA v1 评估材料：两集重点检查字幕及对应辅助说明；它们用于后续统一评价，不作为候选模型输入。
-
-默认英文字幕是 [`sample/A.French.Village.S01E03_eng.srt`](sample/A.French.Village.S01E03_eng.srt)，共 747 个 cue。
+默认使用 Chat Completions API；可通过 `--APImode Responses` 复核 Responses API 路径。当前内置火山方舟与阿里云百炼的六个模型 alias，并支持外部 prompt、CSV/Markdown Glossary、剧集摘要、分批并发、失败重试、字幕前处理、已有运行修复，以及配置驱动的匿名 TQA v2 多模型评测。
 
 ## 主要能力
 
-- 六个模型 alias 统一走 OpenAI SDK；默认 Chat Completions，可用 `--APImode Responses` 切换旧路径。
-- Ark 两种模式都使用 `thinking={"type":"disabled"}`；阿里云 Chat 使用 `enable_thinking=False`，Responses 使用 `reasoning={"effort":"none"}`，均显式关闭思考。
-- `temperature` / `top_p` 默认均不写入请求体；只有 CLI 或 Python 调用显式给值时才发送。
-- 可先通读当前输入范围生成剧集摘要，再按默认 50 cue 分批翻译。
-- JSON 加固、键集合校验、`src` 回显对齐和字幕质量度量。
-- 失败批顺序重跑；仍失败时可按 10→5→2→1 cue 逐级定位和补采。
-- 可选 Stage A 英文字幕前处理，以及最终 `{stem}_zh.srt` 交付。
-- 冻结矩阵支持固定摘要复用、参数 wire evidence、断点续跑和 Provider refusal 留痕。
+- Chat Completions / Responses 两种 API 模式，共用同一套翻译、校验与落盘流程。
+- `temperature` 与 `top_p` 默认 OMIT，仅在显式指定时发送。
+- 默认先生成当前输入范围的摘要，再以 50 cue 为一批翻译。
+- 校验 JSON、键集合、`src` 原文回显、中文行长、行数、CPS 与时间长度。
+- 失败批重试；必要时按更小 sub-batch 继续定位与补采。
+- 可选 Stage A 前处理，以及最终双语 SRT 交付。
+- CSV Glossary 原生支持 `source,target,note` 表头，也兼容既有 Markdown 表格。
+- `bench --all --profile ...` 从单一 YAML 冻结实验参数，完成收集、匿名评分、聚合与可恢复报告。
 
 ## 仓库结构
 
 ```text
-main.py                    # 通用 CLI：ping/selfcheck/repair/smoke/preprocess/run/bench
-model_client.py            # 六模型 Chat/Responses 适配、.env、采样字段 OMIT 语义
+main.py                    # ping/selfcheck/repair/smoke/preprocess/run/bench
+model_client.py            # Chat/Responses 适配、模型配置与调用
 translate.py               # pipeline 公共 API 的兼容 re-export
-pipeline/                  # 字幕翻译、校验、repair、前处理与矩阵采集实现
-sample/                    # 两集全量源字幕、Low 中文参考与 TQA 重点检查材料
-tests/                     # pytest 表征与回归测试
-docs/                      # prompt、Glossary、API/质量/采样证据
-.scratch/                  # 本地 Markdown issue tracker 与路线图
-out/                       # 运行产物；已 gitignore
+TQA.md                     # TQA v2 用户指南与当前支持边界
+pipeline/                  # 翻译、校验、repair、前处理与 TQA 实现
+pipeline/prompts/          # 公开运行时 prompt
+pipeline/tqa/              # TQA v2 Framework、Schema、默认 Profile 与流水线
+scripts/                   # 手动 API 兼容性 smoke 工具
+tests/                     # 自包含 pytest 回归测试
 ```
 
-### 核心模块
-
-| 模块 | 职责 |
-|---|---|
-| `pipeline.srt_io` | SRT 解析、切片、重编号、分批、双语 SRT 组装 |
-| `pipeline.prompt` / `summary` | instructions、Glossary 与剧集摘要 |
-| `pipeline.validate` / `src_align` | JSON 契约、键集合和原文回显对齐 |
-| `pipeline.subtitle_check` | 中文 CPS、行长、行数和时长度量；默认不阻断 |
-| `pipeline.batch_client` / `retry` | 单批模型调用、重试与批级证据落盘 |
-| `pipeline.orchestrator` | `run_once`：摘要→分批→失败重跑→合并 |
-| `pipeline.repair` | 已有 run 的离线恢复、失败批重跑和 sub-batch 补采 |
-| `pipeline.preprocess` | Stage A 英文字幕清理、重切和交付适配 |
-| `pipeline.sampling_matrix` | 冻结 40-case 的外层编排器；复用既有摘要、`run_once`、repair 与落盘能力 |
-| `pipeline.inspection_rescue` | 获明确授权后，对已记录 Provider refusal 执行单术语专用占位补采 |
-
-## 样例与评估材料
-
-| 文件 | cue | 用途 |
-|---|---:|---|
-| `sample/A.French.Village.S01E03_eng.srt` | 747 | S01E03 全量英文模型输入 |
-| `sample/A.French.Village.S01E03_chs.srt` | 747 | S01E03 Low 中文参考 |
-| `sample/A.French.Village.S01E06_eng.srt` | 647 | S01E06 全量英文模型输入 |
-| `sample/A.French.Village.S01E06_chs.srt` | 647 | S01E06 Low 中文参考 |
-| `sample/A_French_Village_S01E03_翻译测试样例.srt` | 79 | 模型译文的重点检查清单 |
-| `sample/A_French_Village_S01E06_翻译测试样例.srt` | 72 | 模型译文的重点检查清单 |
-| `sample/*_翻译测试样例_说明.md` | — | 对应 cue 的 TQA 维度与说明，仅作评价辅助 |
-| `sample/字幕翻译质量评估框架_TQA_v1.md` | — | 九维 TQA 评估框架 |
-
-重点检查 SRT 只保留 Low 中文与英文正文，并使用与全量英文字幕一致的原 cue 编号和时间码。说明文件不是模型输入、独立测试项或正文真值来源。
+本地研究文档、字幕样例、术语表、agent 指令、issue tracker 与冻结实验编排器不属于公开发行包，已由根级 `.gitignore` 排除。使用者需要提供自己的 SRT；Glossary 为可选输入。
 
 ## 环境准备
 
@@ -76,190 +42,187 @@ cp .env.example .env
 # 编辑 .env，填写 ARK/ALI 的 base URL、API key 和 MODEL_* ID
 ```
 
-`.env` 中的 `DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P` 已废弃；即使存在也不会影响调用。`DEFAULT_MAX_OUTPUT_TOKENS` 仍可作为直连 `model_client.call` 的可选上限来源。
+`.env` 中的 `DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P` 已废弃，不影响调用。`DEFAULT_MAX_OUTPUT_TOKENS` 只作为直连 `model_client.call` 的可选上限来源。
 
-## 通用 CLI
+## 快速开始
+
+`run` 的稳定 CLI 契约只有 `--srt` 与 `--model` 必填；其余参数均有默认值并可显式覆盖。`bench` 不接受行内实验参数，字幕、模型、采样臂与运行控制统一从 `--profile` 指定的 YAML 读取。
 
 ```bash
-# 六模型最小连通检查；默认 Chat Completions，会产生真实 API 调用
-python main.py ping
+# 离线解析与校验，不调用 API
+python main.py selfcheck --srt /path/to/input.srt
 
-# 保留的 Responses 路径回归
-python main.py ping --APImode Responses
+# 指定模型的最小连通检查；会产生真实 API 调用，但不进入字幕流程
+python main.py ping --models qwen3.7-plus
 
-# 使用当前默认 E03 样例做离线解析/校验自检
-python main.py selfcheck
-
-# 单元测试
-PYTHONPATH=. pytest -q
-
-# 默认取前 8 个 cue 的烟测
+# Chat Completions 小规模烟测，默认前 8 个 cue
 python main.py smoke \
   --APImode ChatCompletion \
-  --models deepseek-v4-flash \
-  --out out/smoke_flash
+  --srt /path/to/input.srt \
+  --models qwen3.7-plus \
+  --out out/smoke_qwen
 
-# 单模型全量；默认 50 cue/批、batch_jobs=1、max_output_tokens=8192、timeout=300
+# 单模型生产运行
 python main.py run \
   --APImode ChatCompletion \
-  --srt sample/A.French.Village.S01E03_eng.srt \
-  --model deepseek-v4-flash \
-  --glossary docs/Un_Village_francais_Glossary.csv \
-  --batch-size 50 \
-  --batch-jobs 1 \
-  --output out/run_flash_full_bilingual.srt
+  --srt /path/to/input.srt \
+  --model qwen3.7-plus \
+  --glossary /path/to/glossary.csv \
+  --output /path/to/input.zh.srt
 
-# 多模型 benchmark；jobs 是模型并发数，batch-jobs 是单模型批并发数
-python main.py bench \
-  --srt sample/A.French.Village.S01E03_eng.srt \
-  --models all \
-  --jobs 2 \
-  --batch-size 50 \
-  --batch-jobs 1 \
-  --out out/bench
+# 复制并编辑统一 TQA Profile，再完成自动流水线
+cp pipeline/tqa/profile.default.yaml /path/to/my-tqa-profile.yaml
+python main.py bench --all --profile /path/to/my-tqa-profile.yaml
 ```
 
-### 前处理
+`run` 不接受 `--out`。省略 `--output` 时，最终文件自动写到输入 SRT 同目录，文件名为 `{stem}_zh.srt`；显式指定时严格写入该路径。运行期间会使用带唯一标识的临时 workspace：最终 SRT 成功写盘后自动清理，默认不留下过程目录；翻译失败、交付失败或未生成最终字幕时保留在 `out/run_<model>_<timestamp>_<id>/`，并打印“失败证据”路径供诊断和 `repair`。`run --preprocess` 的 Stage A 文件也属于该 workspace，成功后不会在输入目录旁遗留 `.preprocess_<stem>`。
+
+## 检查与恢复命令
+
+| 子命令 | 检查范围 | 是否调用 API |
+|---|---|---|
+| `ping` | 以最少 token 检查所选模型、鉴权和指定 API 模式的连通性；不读取 SRT，不进入翻译 pipeline | 是 |
+| `selfcheck` | 离线检查 SRT 解析、prompt 变量、可选 Glossary 注入、JSON 校验和双语 SRT 输出契约 | 否 |
+| `smoke` | 对真实 SRT 执行端到端小规模翻译，默认从前 8 个 cue 开始，覆盖摘要、prompt、API、校验与落盘 | 是 |
+| `repair` | 恢复已有 run 的失败批并重新合并；优先复用已落盘 JSON，仅在仍缺结果时调用 API | 视缺失结果而定 |
+
+`ping` 只证明 API 连通，不证明字幕翻译链路正确；`selfcheck` 只证明离线契约；需要验证完整链路时使用 `smoke`。`repair` 默认读取 `meta.json` 并复用原运行的 API 模式及显式采样值，显式传入冲突的 `--APImode` 会拒绝执行，避免把同一次运行跨 API 模式混合修复。
+
+## 常用参数
+
+| 参数 | 当前行为 / 默认值 |
+|---|---|
+| `--APImode` / `--api-mode` | `ChatCompletion`；也接受 `Responses` |
+| `--srt` | 读取字幕的命令必填，用户自己的源语言 SRT 路径 |
+| `--model` | `run` 必填；必须选择一个已配置的模型 alias |
+| `--source-language` | 英语；可显式指定模型支持的其他源语言 |
+| `--target-language` | 简体中文；可显式指定模型支持的其他目标语言 |
+| `--prompt` | `pipeline/prompts/translation.md` |
+| `--glossary` | 默认不注入；可传 CSV 或 Markdown 路径 |
+| `--batch-size` | 50；`≤0` 表示整包一批 |
+| `--batch-jobs` | 1；大于 1 时同一模型多批并行 |
+| `--jobs` | 1；`smoke` 等传统多模型命令的模型并发数；bench 使用 Profile 的 `execution.model_jobs` |
+| `--temperature` | `[0,2)`；默认 OMIT |
+| `--top-p` | `(0,1]`；默认 OMIT |
+| `--max-output-tokens` | run/smoke/repair 默认 8192；bench 由 Profile 显式冻结，默认 Profile 为 8192 |
+| `--timeout` | run/repair 默认 300 秒，smoke 默认 180 秒；bench 默认 Profile 为 300 秒 |
+| `--max-retries` | 2 次额外重试 |
+| `--retry-backoff` | 3 秒指数退避基数 |
+| `--no-summary` | 跳过默认剧集摘要 |
+| `--output` | 仅 `run`；默认自动写入输入同目录的 `{stem}_zh.srt`；成功只保留最终 SRT，失败保留过程证据 |
+| `--out` | smoke/preprocess 等目录型产物；run 不接受，bench 使用 Profile 的 `output.root` |
+
+同时显式指定 `temperature` 和 `top_p` 时，CLI 会警告但不阻断。`OMIT` 只表示请求体未发送该字段，不代表不同 Provider 使用相同的数值默认值。
+
+## TQA v2 benchmark
+
+TQA v2 是本项目的正式质量评测流水线，不只是多模型批量运行器。它使用一份统一 YAML Profile 定义候选模型、显式采样参数臂、完整字幕输入、定向评分样例、匿名 evaluator、聚合门槛和输出目录，并支持可恢复的 `plan → collect → evaluate → report` 全链路。
+
+- 模板文件：[pipeline/tqa/profile.default.yaml](pipeline/tqa/profile.default.yaml)。应先复制到实验目录再修改，不要直接把模板当作某次实验记录。
+- 普通用户建议保持无参考模式；单参考模式要求每集各自提供参考 SRT，并显式选择 `anchor` 或 `hint`。
+- `bench --all` 自动完成全部机器阶段，但最终停在 `awaiting_user_decision`，不会替代人工确认。
+- 完整概念、Profile 字段、参考模式、评分规则、产物和当前支持边界见 [TQA.md](TQA.md)。
+
+`bench` 与生产 `run` 分工明确：`run` 交付一个模型的一份字幕；`bench` 比较 Profile 中明确定义的模型与采样参数臂，并执行 TQA v2 评测。公开接口只有两种形式：
+
+```bash
+# 完整执行；最终停在 awaiting_user_decision，不替代人工确认
+python main.py bench --all --profile /path/to/profile.yaml
+
+# 分阶段执行
+python main.py bench plan     --profile /path/to/profile.yaml
+python main.py bench collect  --profile /path/to/profile.yaml
+python main.py bench evaluate --profile /path/to/profile.yaml
+python main.py bench report   --profile /path/to/profile.yaml
+python main.py bench status   --profile /path/to/profile.yaml
+```
+
+`plan` 将 Profile 内相对路径按 Profile 所在目录解析，并在 `output.root` 下冻结 `profile.source.yaml`、`profile.resolved.yaml`、`profile.lock.json` 与 `manifest.json`。同一输出目录若检测到不同 Profile 哈希会拒绝复用。`collect` 按 `model_jobs` 并行模型、按 `batch_jobs` 并行单模型分批；`generate_once` 摘要会按“模型 × 集”冻结并由该模型的后续参数臂复用。
+
+Profile 中的 `source_srt` 始终作为整份字幕进入 collect；`inputs.episodes[].samples` 只指定随后进入 TQA evaluator 评分的定向条目，不会限制翻译范围。若要逐条评分整份字幕，需要将全部 cue 列入 `samples`，相应的评分调用量和费用也会显著增加。
+
+Profile 中的文件路径建议统一使用 YAML 双引号，例如 `"./path/to/glossary.csv"`；`prompt: null` 与 `glossary: null` 表示不提供自定义文件，不能写成字符串 `"null"`。普通用户建议保持 `reference_mode: "no_reference"`。只有拥有可靠、经过人工审核的参考字幕时才使用 `single_reference`；此时 `reference_role` 必填，并且 `inputs.episodes[]` 中每一集都必须各自提供一个 `reference_srt`。`anchor` 表示把参考译文视为可信标准答案并严格比较，`hint` 表示参考译文只辅助理解，合理的不同译法不应被惩罚。
+
+`sampling.arms[].temperature/top_p` 控制候选翻译模型，是被比较的实验变量；`evaluator.temperature` 只控制匿名裁判模型评分时的随机性，不会改变任何候选译文。Evaluator 的任务是针对每个“样例 × 维度”读取匿名源文、候选译文及上下文，输出 0–10 分、硬失败类别、理由与置信度；为提高多轮评分一致性，通常使用较低的 evaluator temperature。
+
+匿名评分输入位于 `anonymized/`，不包含模型、Provider、参数臂、原始文件名/路径或 refusal/rescue 来源；解盲映射通过私有临时文件原子写入权限为 `0600` 的 `blind_map.json`。Evaluator 输出必须满足发布的 Schema，非法输出按预算重试，重复 `evaluator_run_id` 作为程序错误立即终止。Provider refusal 固定由系统记 0 并计入分母，技术故障单独统计且不进入质量分母。若 collect 后的候选记录提供 `rescued_translations`，它会进入独立匿名评分 lane，只生成 `rescued_quality_score`，绝不覆盖 refusal 主评分或进入模型总分；默认翻译 adapter 不自行制造 rescue。
+
+聚合路径固定为“样例 × 维度原始分 → 集内维度平均分 → 维度加权集分 → 按有效样例数加权模型分”。`sample_aggregation` 仅用于报告展示；所有 `max_*` 是包含上界；状态优先级为 `VETO > FAIL > CONDITIONAL_PASS > PASS`。通用规范和机器契约位于 `pipeline/tqa/`，用户只需维护一份 YAML Profile。
+
+## Glossary
+
+推荐 UTF-8 CSV，表头固定为 `source,target,note`。`note` 可以留空；UTF-8 BOM 与带引号的逗号字段均受支持。
+
+```csv
+source,target,note
+Daniel Larcher,达尼埃尔·拉尔谢,人物名
+Villeneuve,维勒纳夫,地名
+```
+
+最终发送给模型的完整 prompt、Glossary 与摘要会写入运行目录的 `instructions.txt`。Chat Completions 将其作为首条 `system` message，Responses 使用 `instructions` 字段。
+
+## 前处理与修复
+
+Stage A 是翻译前的可审计字幕变换：独立 `preprocess` 用于先生成、检查并复用清洗结果，`run --preprocess` 则使用同一套配置和流水线，在 Stage A 成功后继续翻译。两者不是两份实现。
 
 ```bash
 # 只执行 Stage A
 python main.py preprocess \
-  --srt sample/A.French.Village.S01E03_eng.srt \
+  --srt /path/to/input.srt \
   --fix-overlaps \
   --remove-sdh \
-  --out out/preprocess_e03
+  --out out/preprocess
 
-# 前处理后接单模型翻译
+# 前处理后翻译
 python main.py run \
-  --srt sample/A.French.Village.S01E03_eng.srt \
+  --srt /path/to/input.srt \
   --model deepseek-v4-flash \
   --preprocess \
-  --remove-sdh \
-  --output out/run_preprocessed_bilingual.srt
-```
+  --remove-sdh
 
-### 常用参数
-
-| 参数 | 当前行为 / 默认值 |
-|---|---|
-| `--APImode` / `--api-mode` | `ChatCompletion`（默认）；也接受 `Responses`，内部记录为 `chat_completions` / `responses` |
-| `--srt` | `sample/A.French.Village.S01E03_eng.srt` |
-| `--model` / `--models` | 单个 alias、逗号列表或 `all` |
-| `--glossary` | `smoke` / `run` / `bench` 默认不注入，必须显式给路径；推荐 UTF-8 CSV，表头固定为 `source,target,note`，兼容原 Markdown 表格；`repair` 复用原 run 的 `instructions.txt` |
-| `--batch-size` | 50；`≤0` 表示整包一批 |
-| `--batch-jobs` | 1；大于 1 时同一模型多批并行 |
-| `--jobs` | 1；多模型命令的模型并发数 |
-| `--temperature` | `[0,2)`；默认 OMIT，不向 API 发送 |
-| `--top-p` | `(0,1]`；默认 OMIT，不向 API 发送 |
-| `--max-output-tokens` | run/smoke/repair 8192，bench 131072；50-cue 现有生产证据的单批峰值为 3549，仍可显式调高 |
-| `--timeout` | run/repair 300 秒，smoke 180 秒，bench 1200 秒；可显式覆盖 |
-| `--no-summary` | `smoke` / `run` / `bench` 默认生成摘要；传入后跳过 |
-| `--max-retries` / `--retry-backoff` | 2 次额外重试 / 3 秒指数退避 |
-| `--out` | 仅用于 `smoke` / `bench` / `preprocess` 等目录型产物；`run` 已废弃该参数 |
-| `--output` | `run` 的最终双语 SRT 文件路径；默认写到 `--srt` 同目录的 `{stem}_zh.srt`，显式指定则严格写到该路径；内部证据目录自动生成 |
-
-同时显式指定 `temperature` 和 `top_p` 时 CLI 会警告但不阻断。做可归因实验时建议一次只改变一个；`OMIT` 只表示字段未发送，不能写成跨 Provider 的共同数值。
-
-### Glossary CSV
-
-通用翻译命令推荐显式传入 `docs/Un_Village_francais_Glossary.csv`。CSV 使用
-`source,target,note` 表头；`note` 可以留空，存在时会随 `source = target` 映射一起注入
-instructions。UTF-8 BOM 和带引号的逗号字段均受支持。最终发送给模型的完整内容会写入运行目录的
-`instructions.txt`；Chat Completions 将它作为第一条 `system` message，Responses 则使用独立的
-`instructions` 字段。
-
-```csv
-source,target,note
-Daniel Larcher,达尼埃尔·拉尔谢,维勒纳夫市长/大夫
-Villeneuve,维勒纳夫,故事主要发生地
-```
-
-冻结 40-case 矩阵仍固定使用 Markdown 版 Glossary，以保持既有实验哈希与续跑契约不变。
-
-## 修复已有 run
-
-```bash
+# 修复已有运行中的失败批
 python main.py repair \
-  --APImode Responses \
   --run-dir out/run_xxx/qwen3.7-plus \
   --model qwen3.7-plus \
-  --srt sample/A.French.Village.S01E03_eng.srt \
+  --srt /path/to/input.srt \
   --batches 2,3 \
-  --sub-batch-size 10 \
-  --temperature 0.7
+  --sub-batch-size 10
 ```
 
-- 未指定 `--batches` 时，根据 `meta.json` 的失败批或缺键推断。
-- 整批仍失败时，默认按 10→5→2→1 cue 缩小；Provider 仍可拒绝单 cue，repair 不保证成功。
-- repair 必须沿用原 run 的 API 模式与显式采样参数；旧 Responses run 要写 `--APImode Responses`，省略采样字段时继续使用 OMIT。
-- 主 attempt、批目录、`repair.json`、合并后的 `parsed.json` 和最终 SRT 共同构成证据，不能只看最后的 `status`。
+独立 `preprocess` 只接受 Stage A 相关参数：`--srt`、`--out`、`--fix-overlaps/--no-fix-overlaps`、`--remove-sdh`、`--remove-disfluency`、`--optimize`、`--resplit/--no-resplit`、`--words`、`--model` 和 `--APImode/--api-mode`。prompt、Glossary、语言、批处理、token、超时、重试、采样和摘要参数属于翻译阶段，不在该命令中出现。
 
-## 冻结 40-case 参数矩阵
+时间轴去重叠和重切默认使用 `auto`；正反开关互斥。去重叠主要面向 YouTube 滚动窗口自动字幕：`auto` 检测到至少一处不小于 50ms 的相邻 cue 重叠后，才会裁剪全部相邻重叠；普通人工字幕通常无需强制启用。
 
-`pipeline.sampling_matrix` 是当前 Opus 4.6-Low 对齐采集器，不是通用六模型 benchmark。它固定：
+重切是翻译前的**源字幕启发式处理**。`auto` 在英文单行超过 42 字符或 cue 超过 2 行时启动；实际处理还会按源语言行长、行数和阅读速度决定是否拆分，把原时段按字符数比例分配，并在新 cue 间保留 40ms 间隔。它不等同于 Netflix 简体中文交付校验：Netflix 简中译文的默认指标是每行 16 字、最多 2 行、成人节目每秒最多 9 字；这些由翻译后的质量报告统计，Stage A 不保证自动消除全部问题。
 
-- API 模式：`Responses`。这是已冻结采集契约；通用 CLI 改为默认 Chat 后，矩阵内部仍显式固定 Responses，避免续跑混入不同 wire contract。
+`--optimize` 会用 LLM 修正源文且保持 cue 数量，必须同时提供 `--model`；其 API 模式由 `--APImode` 选择。长字幕按每批 100 个可优化 cue 调用，逐批要求完整返回相同键集；纯 SDH/音效 cue 不进入模型并原样保留，只有显式 `--remove-sdh` 才会删除。解析失败、漏键或 API 失败都会终止 Stage A，不会静默跳过。`--words` 必须指向存在的词级时间戳 JSON。独立运行会写出 `input.srt`、`*.clean.srt`、`preprocess_meta.json` 和 `report.json`，供翻译前审查。
 
-- 模型：`deepseek-v4-flash`、`qwen3.7-plus`。
-- 剧集：S01E03（747 cue）、S01E06（647 cue）。
-- 每个模型 10 个采样臂：
-  - `temperature/top_p = OMIT/OMIT`；
-  - `temperature ∈ {0.1, 0.3, 0.7, 1.0, 1.3, 1.5}`，`top_p=OMIT`；
-  - `top_p ∈ {0.7, 0.8, 1.0}`，`temperature=OMIT`。
-- 共 40 个整集 case、560 个主翻译批；每个 case 为 50 cue/批、`batch_jobs=1`。
-- 两个 Provider 流可并行；同一模型内部按 case 顺序执行。
-- 每集摘要只生成一次并冻结复用；Glossary 固定为 `docs/Un_Village_francais_Glossary.md`。
-- 输出文件名包含模型、episode、temperature 与 topP，OMIT 与显式值可直接识别。
+Stage A 是启发式改善流程，不承诺消除全部行长、阅读速度或时间轴警告；结果应以 `report.json` 为准。`run` 中任何 Stage A 开关都必须与 `--preprocess` 同时使用，否则命令拒绝执行。LLM 步骤复用 `run --model`，不引入第二个模型参数。
 
-### 与既有 pipeline 的调用关系
+repair 会从 `meta.json` 自动沿用原运行的 API 模式及 `temperature` / `top_p` 发送记录；如需显式确认或覆盖采样值，可传入相应参数。`--APImode` 只能省略或传入与原运行相同的模式。批目录、合并后的 `parsed.json`、更新后的 `meta.json` 与最终 SRT 共同构成运行证据。
 
-`pipeline.sampling_matrix` 只负责矩阵、状态和阶段编排，不另建一套翻译流水线。各子命令与既有模块的关系如下：
+## Python API
 
-| 子命令 | 调用关系 | 串并行行为 |
-|---|---|---|
-| `summaries` | 逐集调用 `pipeline.summary.generate_episode_summary`，生成或复用冻结摘要 | S01E03、S01E06 依次串行 |
-| `run` | `execute_case` 调用既有 `pipeline.orchestrator.run_once`；后者继续使用 prompt、Glossary、SRT 分批、`batch_client`、retry、validate、字幕度量与 persist | 两个目标模型/Provider 流可并行；同一模型内 case 串行；每个 case 固定 `batch_jobs=1`，批次串行 |
-| `repair` | 对 `status=failed` 的 case 逐个调用既有 `pipeline.repair.repair_run_dir` | case 串行；不会由 `run` 自动触发 |
-| `inspection-rescue` | 对符合条件的失败/refusal case 逐个调用 `pipeline.inspection_rescue`；内部复用 `batch_client.call_one_batch`、`srt_io` 和 persist | case 串行；不会由 `run` 或 `repair` 自动触发 |
+```python
+from pipeline import run_once, self_check_offline
 
-因此，可以先用 `summaries` 独立生成冻结摘要，也可以直接执行 `run`（它会先生成或复用摘要）；`run` 结束后，再按需要分别显式执行 `repair` 和经授权的 `inspection-rescue`。`out/.../TQA-evaluation/` 属于采集完成后的结果评审工具，不被 `sampling_matrix` 导入或调用，也不参与参数采集。
+self_check_offline("/path/to/input.srt")
 
-```bash
-MATRIX_OUT=out/opus46-low-parity-full-matrix-20260809
-
-# 只生成 40-case manifest，不调 API
-python -m pipeline.sampling_matrix plan --out "$MATRIX_OUT"
-
-# 每集只生成一次冻结摘要；会产生真实 API 调用
-python -m pipeline.sampling_matrix summaries \
-  --out "$MATRIX_OUT" \
-  --summary-model deepseek-v4-flash
-
-# 断点续跑采集；已完成 case 会跳过
-python -m pipeline.sampling_matrix run \
-  --out "$MATRIX_OUT" \
-  --summary-model deepseek-v4-flash
-
-python -m pipeline.sampling_matrix status --out "$MATRIX_OUT"
-
-# 对 status=failed 的 case 做普通失败批修复
-python -m pipeline.sampling_matrix repair --out "$MATRIX_OUT"
+result = run_once(
+    srt_path="/path/to/input.srt",
+    model="qwen3.7-plus",
+    glossary_path="/path/to/glossary.csv",
+    batch_size=50,
+    batch_jobs=1,
+    max_output_tokens=8192,
+    timeout=300,
+    api_mode="ChatCompletion",
+    out_dir="out/demo/qwen3.7-plus",
+)
+print(result.ok, result.validate.stats, result.sampling)
 ```
 
-### Provider refusal 与 inspection rescue
-
-普通 repair 仍无法补齐时，case 可以保留为 `provider_refusal`。`inspection-rescue` 是本轮冻结实验的专用、可审计补采手段，不是通用翻译功能：
-
-- 只有用户明确授权且符合 Provider 条款时才可运行。
-- 当前实现仅处理已记录缺键、且原文包含冻结源词 `Communists` 的 cue，并在返回后恢复为 `共产党`；其它内容直接拒绝。
-- 请求使用不透明术语占位符，返回后按冻结 Glossary 恢复；原主 attempt 不改写。
-- case 的主状态仍是 `provider_refusal`，不能算作原始 50-cue 成功。
-- rescue SRT 仍写入普通 `bilingual/` 目录，但文件名永久带 `__inspection-rescue.srt`。
-- `case.json`、`inspection_rescue/pass-*/manifest.json` 和输出哈希记录完整变换。
-
-```bash
-python -m pipeline.sampling_matrix inspection-rescue --out "$MATRIX_OUT"
-```
+`run_once` 的库级默认上限与超时仍为 `131072` 和 `1200` 秒；上例显式使用 CLI `run` 的生产默认值。
 
 ## 模型 alias
 
@@ -276,7 +239,7 @@ python -m pipeline.sampling_matrix inspection-rescue --out "$MATRIX_OUT"
 
 ## 运行产物
 
-通用 `run` 的单模型目录通常包含：
+`smoke`、失败的 `run` 以及其他需要证据的单模型运行目录通常包含：
 
 ```text
 episode_summary.txt
@@ -291,95 +254,28 @@ batch_00/
 parsed.json
 meta.json
 validate.json
-bilingual.srt              # 全部校验通过时生成
-bilingual.PARTIAL.txt      # 未完成时的说明文件
+bilingual.srt
 ```
 
-矩阵采集根目录额外包含：
-
-```text
-matrix.json
-progress.json
-context/<episode>/fixed_summary.json
-cases/<case-id>/case.json
-cases/<case-id>/attempt-*/
-bilingual/<parameter-visible-name>.srt
-```
-
-双语格式：
+最终双语格式：
 
 ```text
 1
 00:00:00,500 --> 00:00:03,340
-跨越界线
-CROSSING THE LINE
+翻译文本
+SOURCE TEXT
 ```
 
-## Python API
-
-```python
-from pipeline import repair_run_dir, run_once, self_check_offline
-
-self_check_offline("sample/A.French.Village.S01E03_eng.srt")
-
-result = run_once(
-    srt_path="sample/A.French.Village.S01E03_eng.srt",
-    model="deepseek-v4-flash",
-    glossary_path="docs/Un_Village_francais_Glossary.csv",
-    batch_size=50,
-    batch_jobs=1,
-    max_output_tokens=8192,
-    timeout=300,
-    api_mode="ChatCompletion",
-    out_dir="out/demo/deepseek-v4-flash",
-)
-print(result.ok, result.validate.stats, result.sampling)
-```
-
-`run_once` 是较早的库级接口，若不显式传入，上限/超时仍为
-`max_output_tokens=131072`、`timeout=1200`；上例显式使用当前 `main.py run` 的生产默认值。
-
-直连模型：
-
-```python
-from model_client import OMIT, call, list_models
-
-print(list_models())
-result = call(
-    "deepseek-v4-flash",
-    "Reply with exactly: OK",
-    temperature=OMIT,
-    top_p=OMIT,
-    max_output_tokens=16,
-    # 默认 ChatCompletion；复核旧路径时传 api_mode="Responses"
-)
-print(result.ok, result.api_mode, result.text, result.usage)
-```
-
-## 文档口径
-
-- [`docs/baseinfo.md`](docs/baseinfo.md)：当前 API、模型配置、采样 OMIT 语义和校验结论。
-- [`docs/translation_prompt.md`](docs/translation_prompt.md)：翻译 instructions 模板。
-- [`docs/Un_Village_francais_Glossary.csv`](docs/Un_Village_francais_Glossary.csv)：通用翻译命令推荐的 `source,target,note` Glossary。
-- [`docs/Un_Village_francais_Glossary.md`](docs/Un_Village_francais_Glossary.md)：冻结 40-case 矩阵继续使用的 Markdown Glossary。
-- [`docs/deepseek-qwen-temperature-top-p-defaults.md`](docs/deepseek-qwen-temperature-top-p-defaults.md)：两 Provider 的采样参数证据。
-- [`sample/字幕翻译质量评估框架_TQA_v1.md`](sample/字幕翻译质量评估框架_TQA_v1.md)：当前 TQA 评价维度与样例规则。
-- [`docs/quality_control.md`](docs/quality_control.md)：早期六模型固定 `1.0/1.0` 对比协议；不代表当前 CLI 默认值，也不覆盖冻结两模型矩阵。
-- [`.scratch/opus46-low-parity/`](.scratch/opus46-low-parity/)：全量 40-case 决策前的研究路线与 tickets，现保留为后续 TQA 评价的规划历史，不是当前采集器执行契约。
-
-## 开发与仓库约定
+## 开发检查
 
 ```bash
-python main.py selfcheck
+python main.py selfcheck --srt /path/to/input.srt
+# 无 API、真实文件 I/O 的 bench 端到端 smoketest
+PYTHONPATH=. pytest -q tests/test_tqa_bench.py::test_bench_all_offline_smoke_runs_end_to_end_and_resumes
 PYTHONPATH=. pytest -q
 git diff --check
 ```
 
-- `.env` 含密钥和模型 ID，禁止提交。
-- `out/`、虚拟环境、缓存和日志已加入 `.gitignore`。
-- `.scratch/<feature>/` 是本仓库的本地 Markdown issue tracker；约定见 `docs/agents/issue-tracker.md`。
-- 修改行为时先写失败测试，再实现；提交前运行全量测试和 `git diff --check`。
+`.env`、`out/`、虚拟环境、缓存与日志不会进入版本控制。
 
-## 许可证与数据
-
-字幕样例、Low 参考译文和术语表仅用于本仓库内 benchmark。使用与分发时请遵守片源版权及模型 Provider 服务条款。
+本项目源代码采用 [MIT License](LICENSE)。用户自行提供的字幕、Glossary、模型生成内容及第三方模型/API 服务不属于本许可证的授权对象，分别受其权利人与服务条款约束。

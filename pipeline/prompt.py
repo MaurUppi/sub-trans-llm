@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from pipeline.config import DEFAULT_GLOSSARY, DEFAULT_PROMPT
+from pipeline.config import DEFAULT_PROMPT
 from pipeline.models import Cue
 
 

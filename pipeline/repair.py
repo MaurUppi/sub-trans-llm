@@ -17,10 +17,17 @@ from pipeline.srt_io import (
     build_bilingual_srt,
     chunk_cues,
     parse_srt,
-    reindex_cues,
     sum_usage,
 )
 from pipeline.validate import validate_response
+
+
+def _sampling_evidence(value: object) -> dict[str, object]:
+    omitted = value is model_client.OMIT or value is None
+    return {
+        "sent": not omitted,
+        "value": None if omitted else float(value),
+    }
 
 
 def repair_run_dir(
@@ -57,26 +64,54 @@ def repair_run_dir(
     )
     instructions = (run_dir / "instructions.txt").read_text(encoding="utf-8")
 
-    # 从 SRT 重建 cues（全局 reindex 后按 input 键过滤）
-    all_cues = reindex_cues(parse_srt(srt_path))
-    # 若 run 是 max_cues 切片，input 键为 0..n-1
-    cues = [c for c in all_cues if c.id in full_input_map]
-    if len(cues) != len(full_input_map):
-        # 仅用 input 文本 + 时间码尽量匹配
-        by_id = {c.id: c for c in all_cues}
-        cues = []
-        for kid, text in sorted(
-            full_input_map.items(), key=lambda x: int(x[0]) if x[0].isdigit() else x[0]
-        ):
-            if kid in by_id:
-                cues.append(by_id[kid])
-            else:
-                cues.append(
-                    Cue(id=kid, seq=int(kid) if kid.isdigit() else 0, start="00:00:00,000", end="00:00:00,000", text=text)
-                )
-
     meta_path = run_dir / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+    cue_offset = int(meta.get("cue_offset") or 0)
+    raw_max_cues = meta.get("max_cues")
+    max_cues = int(raw_max_cues) if raw_max_cues is not None else None
+
+    # 从 SRT 重建 run 当时的 cue 窗口。新 run 使用已落盘 offset；旧 run
+    # 缺少 offset 时按 input 原文寻找唯一连续窗口，绝不静默套用错误时间轴。
+    source_cues = parse_srt(srt_path)
+    ordered_input = sorted(
+        full_input_map.items(),
+        key=lambda item: int(item[0]) if item[0].isdigit() else item[0],
+    )
+    if "cue_offset" in meta or "max_cues" in meta:
+        selected = source_cues[
+            cue_offset : None if max_cues is None else cue_offset + max_cues
+        ]
+    else:
+        expected_text = [text for _key, text in ordered_input]
+        starts = [
+            start
+            for start in range(len(source_cues) - len(expected_text) + 1)
+            if [cue.text for cue in source_cues[start : start + len(expected_text)]]
+            == expected_text
+        ]
+        if len(starts) != 1:
+            raise ValueError(
+                "cannot uniquely align run input to source SRT; "
+                "use the original SRT and an output with cue_offset metadata"
+            )
+        cue_offset = starts[0]
+        max_cues = len(expected_text)
+        selected = source_cues[cue_offset : cue_offset + max_cues]
+
+    if len(selected) != len(ordered_input) or any(
+        cue.text != text for cue, (_key, text) in zip(selected, ordered_input)
+    ):
+        raise ValueError("run input does not match the selected source SRT cues")
+    cues = [
+        Cue(
+            id=key,
+            seq=cue.seq,
+            start=cue.start,
+            end=cue.end,
+            text=cue.text,
+        )
+        for cue, (key, _text) in zip(selected, ordered_input)
+    ]
     batch_size = int(meta.get("batch_size") or DEFAULT_BATCH_SIZE)
     batches = chunk_cues(cues, batch_size)
     n_batches = len(batches)
@@ -288,6 +323,8 @@ def repair_run_dir(
         raw_text="",
         elapsed_sec=elapsed,
         api_mode=api_mode,
+        cue_offset=cue_offset,
+        max_cues=max_cues,
         input_map=full_input_map,
         instructions=instructions,
         cues=cues,
@@ -300,7 +337,10 @@ def repair_run_dir(
             if (run_dir / "episode_summary.txt").is_file()
             else ""
         ),
-        sampling=dict(meta.get("sampling") or {}),
+        sampling={
+            "temperature": _sampling_evidence(temperature),
+            "top_p": _sampling_evidence(top_p),
+        },
     )
     # Preserve cumulative usage on both successful and incomplete repair passes.
     if meta.get("usage"):

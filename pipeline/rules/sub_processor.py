@@ -2,7 +2,7 @@
 """
 sub_processor.py — Single-file SRT subtitle processor (based on srt_handler v2.6)
 
-Multi-language subtitle processing with Netflix-compliant standards,
+Multi-language subtitle processing with language-aware heuristic thresholds,
 intelligent line breaking, and automatic SDH removal.
 
 Usage:
@@ -1471,7 +1471,7 @@ class SRTProcessor:
         return timecodes
 
     def _split_overlong_blocks(self, document: SRTDocument) -> SRTDocument:
-        """Post-processing pass: split blocks that exceed Netflix standards.
+        """Post-processing pass: split blocks that exceed source-language heuristics.
 
         For each block that needs splitting:
           1. Flatten all lines into a single text
@@ -1479,7 +1479,7 @@ class SRTProcessor:
           3. Allocate time proportionally with gaps
           4. Produce new sub-blocks
 
-        Preserves blocks that are already compliant.
+        Preserves blocks that are already within the configured heuristic thresholds.
         """
         new_blocks: List[SubtitleBlock] = []
         split_count = 0

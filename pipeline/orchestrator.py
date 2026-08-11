@@ -12,7 +12,6 @@ from model_client import Usage
 from pipeline.batch_client import call_one_batch
 from pipeline.config import (
     DEFAULT_BATCH_SIZE,
-    DEFAULT_GLOSSARY,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_PROMPT,
     DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
@@ -396,6 +395,8 @@ def run_once(
         raw_text=raw_text,
         elapsed_sec=elapsed,
         api_mode=api_mode,
+        cue_offset=cue_offset,
+        max_cues=max_cues,
         input_map=full_input_map,
         instructions=instructions,
         cues=cues,

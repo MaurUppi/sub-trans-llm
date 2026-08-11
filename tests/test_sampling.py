@@ -4,7 +4,8 @@ import argparse
 import inspect
 
 import model_client
-from main import DEFAULT_SRT, _sampling_from_args, warn_if_both_sampling
+import pytest
+from main import _sampling_from_args, build_parser, warn_if_both_sampling
 from pipeline import orchestrator
 from pipeline.models import BatchOutcome, ValidateReport
 
@@ -17,10 +18,9 @@ def test_default_is_omit_and_ignores_env(monkeypatch):
     assert model_client._resolve_sampling_param(None, "DEFAULT_TOP_P") is None
 
 
-def test_cli_default_srt_is_current_e03_sample() -> None:
-    assert DEFAULT_SRT.name == "A.French.Village.S01E03_eng.srt"
-    assert DEFAULT_SRT.parent.name == "sample"
-    assert DEFAULT_SRT.is_file()
+def test_cli_requires_explicit_srt_path() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["run", "--model", "deepseek-v4-flash"])
 
 
 def test_explicit_value_is_sent(monkeypatch):
@@ -56,7 +56,7 @@ def test_cli_zero_is_not_treated_as_absent():
 
 
 # ---- 官方建议：temperature 与 top_p 只设其一（阿里云/OpenAI 一致口径）----
-# 见 docs/阿里云-OpenAI兼容-Responses创建响应.md L85-86 参数表。
+# Provider 参数说明建议 temperature 与 top_p 只设置其中一个。
 # 采用「警告不阻断」：官方 SCENARIO_CONFIGS 自身同时给两个值，硬互斥会
 # 让官方翻译配置(0.3/0.8)无法复现，也会砍掉消融实验的一个自由度。
 

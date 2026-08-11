@@ -10,7 +10,7 @@ from main import build_parser as build_main_parser
 from pipeline import batch_client, orchestrator, repair, summary
 from pipeline.models import BatchOutcome, ValidateReport
 from pipeline.preprocess.config import PreprocessConfig
-from pipeline.preprocess import vc_optimize_adapter, vc_split_adapter
+from pipeline.preprocess import deliver, vc_optimize_adapter, vc_split_adapter
 
 
 class _Recorder:
@@ -221,9 +221,17 @@ def test_chat_length_finish_reason_maps_to_incomplete(monkeypatch) -> None:
 
 
 def test_both_clis_default_to_chat_and_accept_apimode_option() -> None:
-    main_default = build_main_parser().parse_args(["smoke"])
+    main_default = build_main_parser().parse_args(
+        ["smoke", "--srt", "path/to/input.srt"]
+    )
     main_responses = build_main_parser().parse_args(
-        ["smoke", "--APImode", "Responses"]
+        [
+            "smoke",
+            "--srt",
+            "path/to/input.srt",
+            "--APImode",
+            "Responses",
+        ]
     )
     client_default = model_client.build_parser().parse_args([])
     client_responses = model_client.build_parser().parse_args(
@@ -241,6 +249,8 @@ def test_run_accepts_explicit_output_file_and_rejects_legacy_out_option() -> Non
     args = parser.parse_args(
         [
             "run",
+            "--srt",
+            "path/to/input.srt",
             "--model",
             "qwen3.7-plus",
             "--output",
@@ -254,6 +264,8 @@ def test_run_accepts_explicit_output_file_and_rejects_legacy_out_option() -> Non
         parser.parse_args(
             [
                 "run",
+                "--srt",
+                "path/to/input.srt",
                 "--model",
                 "qwen3.7-plus",
                 "--output",
@@ -276,6 +288,9 @@ def test_run_defaults_to_source_adjacent_output() -> None:
     )
 
     assert args.output is None
+    assert args.api_mode == "chat_completions"
+    assert args.source_language == "英语"
+    assert args.target_language == "简体中文"
 
 
 def test_run_applies_production_defaults_and_allows_explicit_overrides(
@@ -295,17 +310,33 @@ def test_run_applies_production_defaults_and_allows_explicit_overrides(
                 "out_dir": out_dir,
             }
         )
+        model_dir = out_dir / models[0]
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "bilingual.srt").write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\n你好。\nHello.\n",
+            encoding="utf-8",
+        )
         return 0
 
     monkeypatch.setattr(main, "_dispatch", fake_dispatch)
     monkeypatch.setattr(main, "_default_out", lambda _prefix: tmp_path / "internal")
 
     defaults = build_main_parser().parse_args(
-        ["run", "--model", "qwen3.7-plus", "--output", str(tmp_path / "a.srt")]
+        [
+            "run",
+            "--srt",
+            str(tmp_path / "input.srt"),
+            "--model",
+            "qwen3.7-plus",
+            "--output",
+            str(tmp_path / "a.srt"),
+        ]
     )
     explicit = build_main_parser().parse_args(
         [
             "run",
+            "--srt",
+            str(tmp_path / "input.srt"),
             "--model",
             "qwen3.7-plus",
             "--batch-jobs",
@@ -339,6 +370,264 @@ def test_run_applies_production_defaults_and_allows_explicit_overrides(
     assert captured[1]["timeout"] == 600.0
     assert captured[1]["max_retries"] == 5
     assert captured[1]["retry_backoff"] == 7.0
+
+
+def test_run_success_keeps_only_default_delivery_and_removes_workspace(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+    bilingual = (
+        "1\n00:00:00,000 --> 00:00:01,000\n你好。\nHello.\n"
+    )
+
+    def fake_dispatch(models, _args, out_dir):
+        model_dir = out_dir / models[0]
+        model_dir.mkdir(parents=True)
+        (model_dir / "bilingual.srt").write_text(bilingual, encoding="utf-8")
+        (out_dir / "summary.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    args = build_main_parser().parse_args(
+        ["run", "--srt", str(source), "--model", "qwen3.7-plus"]
+    )
+
+    assert main.cmd_run(args) == 0
+    assert source.with_name("episode_zh.srt").read_text(encoding="utf-8") == bilingual
+    assert not workspace.exists()
+    output = capsys.readouterr().out
+    assert "workspace=" in output
+    assert " out=" not in output
+
+
+def test_run_failure_preserves_workspace_for_repair(tmp_path, monkeypatch, capsys) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+
+    def fake_dispatch(_models, _args, out_dir):
+        out_dir.mkdir(parents=True)
+        (out_dir / "failure.txt").write_text("failed", encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    args = build_main_parser().parse_args(
+        ["run", "--srt", str(source), "--model", "qwen3.7-plus"]
+    )
+
+    assert main.cmd_run(args) == 1
+    assert (workspace / "failure.txt").is_file()
+    output = capsys.readouterr().out
+    assert "失败证据" in output
+    assert str(workspace) in output
+
+
+def test_run_preprocess_uses_and_cleans_same_temporary_workspace(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+    resolved_paths = []
+
+    def fake_dispatch(models, args, out_dir):
+        resolved_paths.append(args._resolved_srt)
+        model_dir = out_dir / models[0]
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "bilingual.srt").write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\n你好。\nHello.\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    args = build_main_parser().parse_args(
+        [
+            "run",
+            "--srt",
+            str(source),
+            "--model",
+            "qwen3.7-plus",
+            "--preprocess",
+            "--no-resplit",
+        ]
+    )
+
+    assert main.cmd_run(args) == 0
+    assert resolved_paths[0].parent == workspace / "_preprocess"
+    assert not (tmp_path / ".preprocess_episode").exists()
+    assert not workspace.exists()
+
+
+def test_run_delivery_failure_preserves_workspace_and_returns_failure(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+
+    def fake_dispatch(models, _args, out_dir):
+        model_dir = out_dir / models[0]
+        model_dir.mkdir(parents=True)
+        (model_dir / "bilingual.srt").write_text("translated", encoding="utf-8")
+        return 0
+
+    def fail_delivery(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    monkeypatch.setattr(deliver, "write_zh_srt", fail_delivery)
+    args = build_main_parser().parse_args(
+        ["run", "--srt", str(source), "--model", "qwen3.7-plus"]
+    )
+
+    assert main.cmd_run(args) == 1
+    assert (workspace / "qwen3.7-plus" / "bilingual.srt").is_file()
+    output = capsys.readouterr().out
+    assert "交付失败" in output
+    assert str(workspace) in output
+
+
+def test_run_missing_delivery_is_failure_and_preserves_workspace(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+
+    def fake_dispatch(_models, _args, out_dir):
+        out_dir.mkdir(parents=True)
+        (out_dir / "summary.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    args = build_main_parser().parse_args(
+        ["run", "--srt", str(source), "--model", "qwen3.7-plus"]
+    )
+
+    assert main.cmd_run(args) == 1
+    assert (workspace / "summary.json").is_file()
+    output = capsys.readouterr().out
+    assert "未生成最终字幕" in output
+    assert str(workspace) in output
+
+
+def test_run_cleanup_failure_keeps_success_and_warns(tmp_path, monkeypatch, capsys) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+
+    def fake_dispatch(models, _args, out_dir):
+        model_dir = out_dir / models[0]
+        model_dir.mkdir(parents=True)
+        (model_dir / "bilingual.srt").write_text("translated", encoding="utf-8")
+        return 0
+
+    def fail_cleanup(_path):
+        raise OSError("busy")
+
+    monkeypatch.setattr(main, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    monkeypatch.setattr(main.shutil, "rmtree", fail_cleanup)
+    args = build_main_parser().parse_args(
+        ["run", "--srt", str(source), "--model", "qwen3.7-plus"]
+    )
+
+    assert main.cmd_run(args) == 0
+    assert source.with_name("episode_zh.srt").is_file()
+    assert workspace.is_dir()
+    output = capsys.readouterr().out
+    assert "临时运行目录清理失败" in output
+    assert str(workspace) in output
+
+
+def test_run_dispatch_exception_preserves_workspace_for_repair(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+
+    def fail_dispatch(_models, _args, out_dir):
+        out_dir.mkdir(parents=True)
+        (out_dir / "failure.txt").write_text("failed", encoding="utf-8")
+        raise RuntimeError("provider crashed")
+
+    monkeypatch.setattr(main, "_dispatch", fail_dispatch)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    args = build_main_parser().parse_args(
+        ["run", "--srt", str(source), "--model", "qwen3.7-plus"]
+    )
+
+    assert main.cmd_run(args) == 1
+    assert (workspace / "failure.txt").is_file()
+    output = capsys.readouterr().out
+    assert "运行失败" in output
+    assert str(workspace) in output
+
+
+def test_run_preprocess_exception_preserves_same_workspace(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "episode.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello.\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "internal"
+
+    def fail_preprocess(_args, *, work_dir):
+        work_dir.mkdir(parents=True)
+        (work_dir / "failure.txt").write_text("failed", encoding="utf-8")
+        raise RuntimeError("optimize failed")
+
+    monkeypatch.setattr(main, "_maybe_preprocess", fail_preprocess)
+    monkeypatch.setattr(main, "_default_out", lambda _prefix: workspace)
+    args = build_main_parser().parse_args(
+        [
+            "run",
+            "--srt",
+            str(source),
+            "--model",
+            "qwen3.7-plus",
+            "--preprocess",
+            "--optimize",
+        ]
+    )
+
+    assert main.cmd_run(args) == 1
+    assert (workspace / "_preprocess" / "failure.txt").is_file()
+    output = capsys.readouterr().out
+    assert "前处理失败" in output
+    assert str(workspace) in output
 
 
 def test_all_model_calling_layers_accept_api_mode() -> None:

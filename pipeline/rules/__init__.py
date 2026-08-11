@@ -1,4 +1,4 @@
-"""Rule-based SRT processing (vendored from docs/sub_processor.py / srt_handler)."""
+"""Rule-based SRT processing vendored from srt_handler."""
 from __future__ import annotations
 
 from pipeline.rules.sub_processor import (

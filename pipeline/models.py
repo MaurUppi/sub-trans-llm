@@ -45,6 +45,8 @@ class TranslateResult:
     raw_text: str
     elapsed_sec: float
     api_mode: str = "chat_completions"
+    cue_offset: int = 0
+    max_cues: Optional[int] = None
     input_map: dict[str, str] = field(default_factory=dict)
     instructions: str = ""
     cues: list[Cue] = field(default_factory=list)
@@ -75,6 +77,8 @@ class TranslateResult:
             "incomplete_reason": self.incomplete_reason,
             "elapsed_sec": round(self.elapsed_sec, 3),
             "api_mode": self.api_mode,
+            "cue_offset": self.cue_offset,
+            "max_cues": self.max_cues,
             "ok": self.ok,
             "batch_count": self.batch_count,
             "batch_size": self.batch_size,

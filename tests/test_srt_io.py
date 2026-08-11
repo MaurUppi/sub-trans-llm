@@ -24,12 +24,6 @@ def test_parse_sample_srt(sample_srt):
     assert cues[0].start == "00:00:01,000"
 
 
-def test_parse_full_episode(srt_path):
-    cues = parse_srt(srt_path)
-    assert len(cues) == 747
-    assert cues[0].text.startswith("CROSSING")
-
-
 def test_reindex_and_slice(sample_srt):
     cues = parse_srt(sample_srt)
     re = reindex_cues(cues)

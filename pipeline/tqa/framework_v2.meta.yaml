@@ -1,0 +1,6 @@
+framework_version: v2
+minimum_profile_version: "1.0"
+document: framework_v2.md
+document_sha256: ef19d9147b7c139f3525d03bd4489a599bba66b8e017940a5a7b7c11df8c81cd
+machine_schema: framework_v2.schema.yaml
+machine_schema_sha256: 6bd75f9e2fe7b76a4e8499d42bd14e3ea62d4ae7e9c6675db3ba59313f352c4c

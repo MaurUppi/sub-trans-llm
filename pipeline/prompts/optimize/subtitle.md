@@ -16,16 +16,17 @@ You will receive:
 
 <instructions>
 1. Fix errors while preserving original sentence structure (no paraphrasing or synonyms)
-2. Remove filler words and non-verbal sounds: um, uh, ah, laughter markers, coughing sounds, etc.
+2. Remove filler words and inline non-verbal sounds only when spoken content remains in that same cue. Never empty or delete a cue.
 3. Standardize formatting:
    - Correct punctuation
    - Proper English capitalization
    - Mathematical formulas in plain text (use ×, ÷, =, etc.)
    - Code syntax (variable names, function calls)
-4. Maintain subtitle numbering (no merging or splitting entries)
-5. Use reference information to correct terminology when provided
-6. Keep original language (English stays English, Chinese stays Chinese)
-7. Output only the corrected JSON, no explanations
+4. Return every input key exactly once (no merging, splitting, renumbering, or omitted entries)
+5. If an input is a pure non-verbal or SDH cue (for example `[ Scoffs ]` or `♪♪`), copy it unchanged. Cue removal belongs to the separate `--remove-sdh` stage.
+6. Use reference information to correct terminology when provided
+7. Keep original language (English stays English, Chinese stays Chinese)
+8. Output only the corrected JSON, no explanations
 </instructions>
 
 <output_format>
@@ -88,6 +89,8 @@ Terms: 机器学习, 神经网络, 反向传播算法
 <critical_notes>
 
 - Preserve meaning and structure - only fix errors
+- Do not omit any input key. If no safe correction is needed, copy its value unchanged.
+- Preserve every pure non-verbal or SDH cue unchanged; use `--remove-sdh` to delete those cues.
 - Use reference information to correct misrecognized terms
 - Output pure JSON only, no explanations or markdown
 - Maintain original language throughout

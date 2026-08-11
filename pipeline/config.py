@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PROMPT = ROOT / "docs" / "translation_prompt.md"
-DEFAULT_GLOSSARY = ROOT / "docs" / "Un_Village_francais_Glossary.md"
+DEFAULT_PROMPT = ROOT / "pipeline" / "prompts" / "translation.md"
+DEFAULT_GLOSSARY = None
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS = 2048

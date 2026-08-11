@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""思考关闭烟测：验证 6 个模型（Ark 3 + 阿里云 3）思考模式确实关闭。
+"""Responses 兼容路径烟测：验证 6 个模型的思考模式确实关闭。
 
 判据（三项全过才算 PASS）：
   1. status == "completed"（未因预算耗尽而 incomplete）
@@ -10,7 +10,7 @@
 
 用法::
 
-    python3 scripts/smoke_thinking.py              # 只测正路径（默认关思考）
+    python3 scripts/smoke_thinking.py              # Responses 正路径（关思考）
     python3 scripts/smoke_thinking.py --control    # 额外跑对照组（不传关闭参数）
     python3 scripts/smoke_thinking.py -m qwen3.7-max
 """

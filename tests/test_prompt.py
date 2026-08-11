@@ -9,10 +9,9 @@ from pipeline.models import Cue
 from pipeline.srt_io import parse_srt, slice_cues
 
 
-def test_compact_glossary(glossary_path=None):
-    from tests.conftest import GLOSSARY
-    text = compact_glossary(GLOSSARY)
-    assert "Daniel Larcher" in text or "达尼埃尔" in text
+def test_compact_glossary(glossary_path):
+    text = compact_glossary(glossary_path)
+    assert "Daniel Larcher" in text
     assert " = " in text
 
 
@@ -39,13 +38,11 @@ def test_compact_glossary_rejects_csv_without_required_header(tmp_path: Path) ->
         compact_glossary(glossary)
 
 
-def test_build_instructions_replaces_vars():
-    from tests.conftest import PROMPT, GLOSSARY
+def test_build_instructions_replaces_vars(glossary_path):
     inst = build_instructions(
         source_language="英语",
         target_language="简体中文",
-        prompt_path=PROMPT,
-        glossary_path=GLOSSARY,
+        glossary_path=glossary_path,
     )
     assert "英语" in inst or "简体中文" in inst
     assert "${sourceLanguage}" not in inst

@@ -2,7 +2,7 @@
 字幕翻译模块：SRT → JSON input、外部文件拼 instructions、校验、双语 SRT。
 
 实现已拆至 ``pipeline/`` 包；本文件保持稳定 re-export，兼容 main.py。
-约定见 docs/quality_control.md / docs/benchmark_plan.md。
+具体调用方式与当前默认值见 README.md。
 """
 
 from __future__ import annotations

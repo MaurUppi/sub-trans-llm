@@ -4,7 +4,7 @@
 （见 `orchestrator.build_bilingual_srt` 调用处）。所以 `src` 字段唯一的用途
 就是**验证这一条译文确实对应这一条原文**——字幕翻译最危险的事故是整批错位：
 键都在、`tr` 都非空、JSON 完全合法，但第 37 条的译文其实是第 36 条的。
-json_schema / json_object 对这种事故零作用（见 `docs/baseinfo.md`），
+json_schema / json_object 对这种事故零作用，因此必须在本地逐条对齐，
 只能靠回显比对。
 
 因此这里把「不匹配」细分，避免用一刀切的相等判断误伤正常的回显走样：

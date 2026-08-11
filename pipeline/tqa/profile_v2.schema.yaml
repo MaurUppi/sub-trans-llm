@@ -1,0 +1,211 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: Sub-trans-llm unified TQA bench profile v1
+type: object
+additionalProperties: false
+required: [profile_version, framework, project, inputs, translation, sampling, execution, tqa, evaluator, output]
+properties:
+  profile_version: {const: "1.0"}
+  framework:
+    type: object
+    additionalProperties: false
+    required: [version]
+    properties: {version: {const: v2}}
+  project:
+    type: object
+    additionalProperties: false
+    required: [name, source_language, target_language]
+    properties:
+      name: {type: string, minLength: 1}
+      source_language: {type: string, minLength: 1}
+      target_language: {type: string, minLength: 1}
+  inputs:
+    type: object
+    additionalProperties: false
+    required: [episodes]
+    properties:
+      episodes:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [id, source_srt, samples]
+          properties:
+            id: {type: string, minLength: 1}
+            source_srt: {type: string, minLength: 1}
+            reference_srt: {type: string, minLength: 1}
+            samples:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                additionalProperties: false
+                required: [cue_id, dimensions, note]
+                properties:
+                  cue_id: {type: integer, minimum: 1}
+                  dimensions:
+                    type: array
+                    minItems: 1
+                    uniqueItems: true
+                    items: {type: string, minLength: 1}
+                  note: {type: string, minLength: 1}
+  translation:
+    type: object
+    additionalProperties: false
+    required: [models, api_mode, prompt, glossary, summary]
+    properties:
+      models:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items: {type: string, minLength: 1}
+      api_mode: {enum: [ChatCompletion, chat_completions, Responses, responses]}
+      prompt: {type: [string, "null"]}
+      glossary: {type: [string, "null"]}
+      summary:
+        type: object
+        additionalProperties: false
+        required: [mode]
+        properties:
+          mode: {enum: [generate_once, none]}
+          max_output_tokens: {type: integer, minimum: 1}
+          timeout: {type: number, exclusiveMinimum: 0}
+  sampling:
+    type: object
+    additionalProperties: false
+    required: [arms]
+    properties:
+      arms:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [temperature, top_p]
+          properties:
+            temperature:
+              oneOf:
+                - {const: OMIT}
+                - {type: number, minimum: 0, exclusiveMaximum: 2}
+            top_p:
+              oneOf:
+                - {const: OMIT}
+                - {type: number, exclusiveMinimum: 0, maximum: 1}
+  execution:
+    type: object
+    additionalProperties: false
+    required: [batch_size, batch_jobs, model_jobs, max_output_tokens, timeout, max_retries, retry_backoff]
+    properties:
+      batch_size: {type: integer, minimum: 1}
+      batch_jobs: {type: integer, minimum: 1}
+      model_jobs: {type: integer, minimum: 1}
+      max_output_tokens: {type: integer, minimum: 1}
+      timeout: {type: number, exclusiveMinimum: 0}
+      max_retries: {type: integer, minimum: 0}
+      retry_backoff: {type: number, exclusiveMinimum: 0}
+  tqa:
+    type: object
+    additionalProperties: false
+    required: [reference_mode, dimension_instances, dimension_weights, sample_aggregation, severity_thresholds, hard_failures, thresholds, conditional_pass, refusal_handling]
+    properties:
+      reference_mode: {enum: [no_reference, single_reference]}
+      reference_role: {enum: [anchor, hint]}
+      dimension_instances:
+        type: object
+        minProperties: 1
+        additionalProperties: {type: object}
+      dimension_weights:
+        type: object
+        minProperties: 1
+        additionalProperties: {type: number, minimum: 0}
+      sample_aggregation:
+        enum: [weighted_avg, min, harmonic]
+        x-report-only: true
+      severity_thresholds:
+        type: object
+        additionalProperties: false
+        required: [critical_upper, major_upper, minor_upper]
+        properties:
+          critical_upper: {type: integer, minimum: 0, maximum: 9}
+          major_upper: {type: integer, minimum: 0, maximum: 9}
+          minor_upper: {type: integer, minimum: 0, maximum: 9}
+      hard_failures:
+        type: object
+        additionalProperties: false
+        required: [enabled, max_hard_failures_per_episode]
+        properties:
+          enabled:
+            type: array
+            uniqueItems: true
+            items: {$ref: "#/$defs/hard_failure"}
+          max_hard_failures_per_episode: {type: integer, minimum: 0}
+      thresholds:
+        type: object
+        additionalProperties: false
+        required: [dimension_floor, episode_pass, model_pass, hard_failure_veto]
+        properties:
+          dimension_floor: {type: number, minimum: 0, maximum: 10}
+          episode_pass: {type: number, minimum: 0, maximum: 10}
+          model_pass: {type: number, minimum: 0, maximum: 10}
+          hard_failure_veto: {type: boolean}
+      conditional_pass:
+        type: object
+        additionalProperties: false
+        required: [max_failed_dimensions, max_hard_failures_per_episode]
+        properties:
+          max_failed_dimensions: {type: integer, minimum: 0}
+          max_hard_failures_per_episode: {type: integer, minimum: 0}
+      refusal_handling:
+        type: object
+        additionalProperties: false
+        required: [mode, default_score, mark_as_hard_failure, hard_failure_type]
+        properties:
+          mode: {const: count_and_mark}
+          default_score: {const: 0}
+          mark_as_hard_failure: {type: boolean}
+          hard_failure_type: {$ref: "#/$defs/hard_failure"}
+  evaluator:
+    type: object
+    additionalProperties: false
+    required: [model, runs, temperature, context_window, divergence_threshold, divergence_action, re_evaluate_extra_runs, final_score, random_seed, max_retries]
+    properties:
+      model: {type: string, minLength: 1}
+      api_mode: {enum: [ChatCompletion, chat_completions, Responses, responses]}
+      runs: {type: integer, minimum: 1}
+      temperature: {type: number, minimum: 0, exclusiveMaximum: 2}
+      top_p: {type: number, exclusiveMinimum: 0, maximum: 1}
+      context_window: {type: integer, minimum: 0}
+      divergence_threshold: {type: number, minimum: 0, maximum: 10}
+      divergence_action: {enum: [re_evaluate, flag_only]}
+      re_evaluate_extra_runs: {type: integer, minimum: 0}
+      final_score: {enum: [median, mean, trimmed_mean]}
+      random_seed: {type: integer}
+      max_retries: {type: integer, minimum: 0}
+      max_output_tokens: {type: integer, minimum: 1}
+      timeout: {type: number, exclusiveMinimum: 0}
+  output:
+    type: object
+    additionalProperties: false
+    required: [root]
+    properties:
+      root: {type: string, minLength: 1}
+$defs:
+  hard_failure:
+    enum: [SEMANTIC_INVERSION, IDENTITY_CONFUSION, CRITICAL_OMISSION, FABRICATION, OFFENSIVE_MISTRANSLATION]
+allOf:
+  - if:
+      properties:
+        tqa:
+          properties:
+            reference_mode: {const: single_reference}
+          required: [reference_mode]
+      required: [tqa]
+    then:
+      properties:
+        tqa:
+          required: [reference_role]
+        inputs:
+          properties:
+            episodes:
+              items:
+                required: [reference_srt]
