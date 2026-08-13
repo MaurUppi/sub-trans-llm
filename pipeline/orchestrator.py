@@ -113,6 +113,8 @@ def run_once(
         episode_summary, summary_usage, _sum_status, sum_err = generate_episode_summary(
             model,
             cues,
+            source_language=source_language,
+            glossary_path=glossary_path,
             max_output_tokens=summary_max_output_tokens,
             timeout=summary_timeout,
             temperature=temperature,

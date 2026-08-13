@@ -11,7 +11,7 @@ from model_client import Usage
 from pipeline.config import DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS
 from pipeline.logging_util import log
 from pipeline.models import Cue
-from pipeline.prompt import SUMMARY_INSTRUCTIONS, build_summary_input
+from pipeline.prompt import build_summary_input, build_summary_instructions
 from pipeline.retry import is_retryable_exception
 
 
@@ -19,6 +19,8 @@ def generate_episode_summary(
     model: str,
     cues: list[Cue],
     *,
+    source_language: str = "英语",
+    glossary_path: Optional[Path | str] = None,
     max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
     timeout: float = 180.0,
     temperature: Optional[float] = None,
@@ -36,6 +38,10 @@ def generate_episode_summary(
     summary, usage, status, error_message
     """
     summary_input = build_summary_input(cues)
+    instructions = build_summary_instructions(
+        source_language=source_language,
+        glossary_path=glossary_path,
+    )
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "episode_summary_input.txt").write_text(
@@ -54,7 +60,7 @@ def generate_episode_summary(
             mr = model_client.call(
                 model,
                 summary_input,
-                instructions=SUMMARY_INSTRUCTIONS,
+                instructions=instructions,
                 temperature=temperature,
                 top_p=top_p,
                 max_output_tokens=max_output_tokens,

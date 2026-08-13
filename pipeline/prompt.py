@@ -102,7 +102,7 @@ def build_summary_input(cues: list[Cue]) -> str:
     return "\n".join(lines)
 
 
-SUMMARY_INSTRUCTIONS = """你是影视字幕分析助手。下面是一整集英文字幕（每行：id<TAB>原文）。
+SUMMARY_INSTRUCTIONS = """你是影视字幕分析助手。下面是一整集${sourceLanguage}字幕（每行：id<TAB>原文）。
 请用简体中文输出本集「翻译用摘要」，控制在 400 字以内，包含：
 1) 一句话梗概
 2) 主要人物及其关系/立场（本集内）
@@ -110,3 +110,17 @@ SUMMARY_INSTRUCTIONS = """你是影视字幕分析助手。下面是一整集英
 4) 翻译时需注意的称谓、潜台词、伏笔或专有名词线索
 
 要求：只输出摘要正文，不要 JSON，不要条目译文，不要 Markdown 标题堆砌。"""
+
+
+def build_summary_instructions(
+    source_language: str = "英语",
+    glossary_path: Optional[Path | str] = None,
+) -> str:
+    """通读摘要用 instructions：按 source_language 替换，可选附加词库。"""
+    text = SUMMARY_INSTRUCTIONS.replace("${sourceLanguage}", source_language)
+    parts = [text.rstrip()]
+    if glossary_path:
+        g = compact_glossary(glossary_path)
+        if g.strip():
+            parts.append("\n\n## 专有名词（必须遵守，不得另译）\n" + g)
+    return "\n".join(parts).strip() + "\n"

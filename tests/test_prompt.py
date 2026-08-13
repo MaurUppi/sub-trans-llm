@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.prompt import build_instructions, build_summary_input, compact_glossary
+from pipeline.prompt import (
+    build_instructions,
+    build_summary_input,
+    build_summary_instructions,
+    compact_glossary,
+)
 from pipeline.models import Cue
 from pipeline.srt_io import parse_srt, slice_cues
 
@@ -53,3 +58,29 @@ def test_build_summary_input(sample_srt):
     cues = slice_cues(parse_srt(sample_srt), max_cues=2)
     s = build_summary_input(cues)
     assert "0\t" in s and "Hello" in s
+
+
+def test_build_summary_instructions_follows_source_language() -> None:
+    text = build_summary_instructions(source_language="法语")
+    assert "一整集法语字幕" in text
+    assert "一整集英文字幕" not in text
+    assert "${sourceLanguage}" not in text
+
+
+def test_build_summary_instructions_default_uses_cli_source_language() -> None:
+    text = build_summary_instructions()
+    assert "一整集英语字幕" in text
+    assert "一整集英文字幕" not in text
+
+
+def test_build_summary_instructions_includes_glossary_when_provided(
+    glossary_path: Path,
+) -> None:
+    text = build_summary_instructions(glossary_path=glossary_path)
+    assert "## 专有名词（必须遵守，不得另译）" in text
+    assert "Daniel Larcher = 达尼埃尔·拉尔谢（市长）" in text
+
+
+def test_build_summary_instructions_omits_glossary_when_absent() -> None:
+    text = build_summary_instructions(source_language="英语")
+    assert "## 专有名词（必须遵守，不得另译）" not in text

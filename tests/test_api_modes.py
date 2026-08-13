@@ -697,3 +697,70 @@ def test_run_once_propagates_api_mode_and_persists_it(
     assert batch_modes == ["responses", "responses"]
     assert result.api_mode == "responses"
     assert result.meta_dict()["api_mode"] == "responses"
+
+
+def _summary_response_ok(api_mode: str):
+    if api_mode == "chat_completions":
+        return SimpleNamespace(
+            model="provider-model-id",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="本集摘要"),
+                    finish_reason="stop",
+                )
+            ],
+            usage={"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+        )
+    return SimpleNamespace(
+        model="provider-model-id",
+        output_text="本集摘要",
+        output=[],
+        status="completed",
+        incomplete_details=None,
+        max_output_tokens=64,
+        usage={
+            "input_tokens": 8,
+            "output_tokens": 4,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 12,
+        },
+    )
+
+
+@pytest.mark.parametrize("api_mode", ["chat_completions", "responses"])
+def test_summary_request_follows_source_language_and_glossary_in_both_api_modes(
+    monkeypatch, glossary_path, api_mode
+) -> None:
+    chat_response = _summary_response_ok("chat_completions")
+    responses_response = _summary_response_ok("responses")
+    client, chat, responses = _fake_client(
+        chat_response=chat_response,
+        responses_response=responses_response,
+    )
+    _patch_model(monkeypatch, client, provider="ali")
+
+    result_summary, _usage, status, err = summary.generate_episode_summary(
+        "test-alias",
+        [SimpleNamespace(id="0", text="Bonjour")],
+        source_language="法语",
+        glossary_path=glossary_path,
+        max_output_tokens=64,
+        api_mode=api_mode,
+    )
+
+    assert status == "completed"
+    assert err is None
+    assert result_summary == "本集摘要"
+
+    if api_mode == "chat_completions":
+        assert responses.calls == []
+        instructions = chat.calls[0]["messages"][0]["content"]
+        assert chat.calls[0]["messages"][0]["role"] == "system"
+    else:
+        assert chat.calls == []
+        instructions = responses.calls[0]["instructions"]
+
+    assert "一整集法语字幕" in instructions
+    assert "一整集英文字幕" not in instructions
+    assert "## 专有名词（必须遵守，不得另译）" in instructions
+    assert "Daniel Larcher = 达尼埃尔·拉尔谢（市长）" in instructions
