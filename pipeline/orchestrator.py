@@ -114,6 +114,7 @@ def run_once(
             model,
             cues,
             source_language=source_language,
+            target_language=target_language,
             glossary_path=glossary_path,
             max_output_tokens=summary_max_output_tokens,
             timeout=summary_timeout,

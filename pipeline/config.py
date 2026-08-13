@@ -6,6 +6,7 @@ from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROMPT = ROOT / "pipeline" / "prompts" / "translation.md"
+DEFAULT_SUMMARY_PROMPT = ROOT / "pipeline" / "prompts" / "summary.md"
 DEFAULT_GLOSSARY = None
 DEFAULT_MAX_OUTPUT_TOKENS = 131072
 DEFAULT_BATCH_SIZE = 50

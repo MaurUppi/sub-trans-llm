@@ -20,6 +20,7 @@ def generate_episode_summary(
     cues: list[Cue],
     *,
     source_language: str = "英语",
+    target_language: str = "简体中文",
     glossary_path: Optional[Path | str] = None,
     max_output_tokens: int = DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
     timeout: float = 180.0,
@@ -40,6 +41,7 @@ def generate_episode_summary(
     summary_input = build_summary_input(cues)
     instructions = build_summary_instructions(
         source_language=source_language,
+        target_language=target_language,
         glossary_path=glossary_path,
     )
     if out_dir:

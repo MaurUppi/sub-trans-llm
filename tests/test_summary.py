@@ -32,11 +32,13 @@ def test_generate_episode_summary_instructions_follow_source_language(
         "test-alias",
         [Cue(id="0", seq=1, start="00:00:01,000", end="00:00:02,000", text="Bonjour")],
         source_language="法语",
+        target_language="日语",
     )
 
     instructions = str(captured["instructions"])
-    assert "一整集法语字幕" in instructions
-    assert "一整集英文字幕" not in instructions
+    assert "当前法语字幕" in instructions
+    assert "请用日语输出" in instructions
+    assert "一整集" not in instructions
 
 
 def test_generate_episode_summary_includes_glossary_when_provided(
@@ -57,7 +59,7 @@ def test_generate_episode_summary_includes_glossary_when_provided(
     )
 
     instructions = str(captured["instructions"])
-    assert "## 专有名词（必须遵守，不得另译）" in instructions
+    assert "## 专有名词（摘要中使用表内译名，不要另造）" in instructions
     assert "Daniel Larcher = 达尼埃尔·拉尔谢（市长）" in instructions
 
 
@@ -75,7 +77,9 @@ def test_generate_episode_summary_omits_glossary_when_absent(monkeypatch) -> Non
         [Cue(id="0", seq=1, start="00:00:01,000", end="00:00:02,000", text="Hello")],
     )
 
-    assert "## 专有名词（必须遵守，不得另译）" not in str(captured["instructions"])
+    assert "## 专有名词（摘要中使用表内译名，不要另造）" not in str(
+        captured["instructions"]
+    )
 
 
 def test_run_once_forwards_source_language_and_glossary_to_summary(
@@ -120,6 +124,7 @@ def test_run_once_forwards_source_language_and_glossary_to_summary(
         model="test-alias",
         prompt_path=prompt,
         source_language="法语",
+        target_language="日语",
         glossary_path=glossary_path,
         out_dir=tmp_path / "out",
         max_cues=1,
@@ -127,4 +132,5 @@ def test_run_once_forwards_source_language_and_glossary_to_summary(
     )
 
     assert captured["source_language"] == "法语"
+    assert captured["target_language"] == "日语"
     assert Path(str(captured["glossary_path"])) == glossary_path

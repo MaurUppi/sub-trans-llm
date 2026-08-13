@@ -743,6 +743,7 @@ def test_summary_request_follows_source_language_and_glossary_in_both_api_modes(
         "test-alias",
         [SimpleNamespace(id="0", text="Bonjour")],
         source_language="法语",
+        target_language="日语",
         glossary_path=glossary_path,
         max_output_tokens=64,
         api_mode=api_mode,
@@ -760,7 +761,8 @@ def test_summary_request_follows_source_language_and_glossary_in_both_api_modes(
         assert chat.calls == []
         instructions = responses.calls[0]["instructions"]
 
-    assert "一整集法语字幕" in instructions
-    assert "一整集英文字幕" not in instructions
-    assert "## 专有名词（必须遵守，不得另译）" in instructions
+    assert "当前法语字幕" in instructions
+    assert "请用日语输出" in instructions
+    assert "一整集" not in instructions
+    assert "## 专有名词（摘要中使用表内译名，不要另造）" in instructions
     assert "Daniel Larcher = 达尼埃尔·拉尔谢（市长）" in instructions

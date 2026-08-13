@@ -12,6 +12,9 @@ def test_defaults_and_paths():
     assert config.DEFAULT_PROMPT.parent.name == "prompts"
     assert config.DEFAULT_PROMPT.parent.parent.name == "pipeline"
     assert config.DEFAULT_PROMPT.is_file()
+    assert config.DEFAULT_SUMMARY_PROMPT.name == "summary.md"
+    assert config.DEFAULT_SUMMARY_PROMPT.parent == config.DEFAULT_PROMPT.parent
+    assert config.DEFAULT_SUMMARY_PROMPT.is_file()
     assert config.DEFAULT_GLOSSARY is None
     assert config.ROOT.is_dir()
     assert config.ELLIPSIS_OK == "\u2026"
